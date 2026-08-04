@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dzdoc"
+version = "0.1.0"
+description = "Independent Arabic-French document intelligence engine foundation"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "MERATI Ali Ouala Eddine" }]
+dependencies = [
+  "pydantic>=2.7,<3",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.6,<1",
+]
+pdf = ["PyMuPDF>=1.24,<2"]
+
+[project.scripts]
+dzdoc = "dzdoc.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dzdoc"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
