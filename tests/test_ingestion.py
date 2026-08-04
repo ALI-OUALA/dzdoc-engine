@@ -17,3 +17,8 @@ def test_invalid_signature_rejected():
 def test_size_limit_rejected():
     with pytest.raises(IngestionError):
         SecureIngestor(max_bytes=4).from_bytes(b"%PDF-1.7")
+
+
+def test_non_bytes_input_rejected():
+    with pytest.raises(IngestionError, match="bytes-like"):
+        SecureIngestor().from_bytes("%PDF-1.7")

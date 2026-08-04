@@ -52,14 +52,16 @@ class SecureIngestor:
         self.root_dir = root_dir.resolve() if root_dir else None
 
     def from_bytes(self, data: bytes, *, name: str = "document.bin") -> DocumentInput:
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise IngestionError("document data must be bytes-like")
         if len(data) > self.max_bytes:
             raise IngestionError(f"document exceeds {self.max_bytes} byte limit")
+        data = bytes(data)
         kind = _kind_for_signature(data)
         if kind is None:
             raise IngestionError("unsupported or invalid document signature")
-        return DocumentInput(
-            name=Path(name).name, data=bytes(data), kind=kind, sha256=_sha256(data)
-        )
+        safe_name = Path(name).name or "document.bin"
+        return DocumentInput(name=safe_name[:255], data=data, kind=kind, sha256=_sha256(data))
 
     def load(self, source: str | Path) -> DocumentInput:
         path = Path(source).expanduser().resolve(strict=True)

@@ -1,9 +1,10 @@
+.models/
+.tmp/
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-.tmp/
-.venv/
 dist/
 build/
 *.egg-info/

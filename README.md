@@ -2,17 +2,23 @@
 
 Independent source-available foundation for Arabic–French document intelligence.
 
-Current Phase 1 foundation provides:
+Current deterministic foundation provides:
 
 - versioned canonical document models with raw, normalized, and search text;
 - safe local document ingestion and SHA-256 fingerprinting;
-- optional PyMuPDF native PDF inspection and a native-text quality gate;
+- optional PDFium native PDF inspection and a native-text quality gate;
 - explicit hybrid-pipeline protocols with no vendor imports in core models;
-- deterministic fake pipeline that records when OCR is required;
+- page-level native-text routing and rendering of rejected pages only;
+- one PP-OCRv5 text-detection pass per OCR page;
+- Arabic-first region routing to pinned Arabic/Latin PP-OCRv5 recognizers;
+- deterministic candidate fusion, digit disagreement warnings, alternatives,
+  provenance, confidence, and RTL/LTR geometric reading order;
 - JSON export and a neutral DZ-Bench `Predictions` artifact.
 
-No production OCR model is bundled. Empty OCR pages are reported as explicit
-`ocr_required` warnings; they are not silent success claims.
+No model weight is bundled or downloaded at install/test time.
+Native-text PDFs can be inspected and processed without OCR assets. Raster pages
+fail closed unless `DZDOC_MODEL_DIR` (or `--model-dir`) points to the reviewed
+asset directories; the engine never performs an implicit unpinned download.
 
 ## Quick start
 
@@ -22,16 +28,36 @@ uv run dzdoc process .\document.pdf --output .\document.json
 uv run dzdoc export-prediction .\document.pdf --dataset-id synthetic-smoke --dataset-revision 0.1.0 --output .\predictions.json
 ```
 
-Install PDF inspection support with `uv sync --extra pdf`. The local environment
-used for development already provides PyMuPDF, but it remains an optional adapter.
+Install the complete local CPU profile and fetch immutable reviewed weights:
+
+```powershell
+uv sync --extra pdf --extra ocr-paddle --extra dev
+uv run python scripts/fetch_models.py --output .models
+$env:DZDOC_MODEL_DIR = (Resolve-Path .models)
+uv run dzdoc process .\scan.pdf --output .\document.json
+```
+
+For a public DZ-Bench raster bundle, keep the manifest and records JSON artifacts
+at the published contract version and run:
+
+```powershell
+uv run dzdoc evaluate-bundle --manifest .\manifest.json --records .\records.json --assets-dir .\assets --output .\predictions.json
+```
+
+The runner validates the manifest, rejects unknown fields and unsafe asset paths,
+hashes each asset, and sends the same verified bytes to the pipeline.
 
 Prediction JSON follows the public `Predictions` contract implemented independently
 by `dz-bench`; this package does not import `dz_bench`.
 
 ## Status
 
-Implemented and tested: Phase 1 structural foundation, safe ingestion checks, native
-text quality routing, JSON serialization, CLI smoke flow, and contract-shaped export.
+Implemented and tested: canonical models, byte/page/pixel ingestion limits, native
+text quality routing, selective rendering, real PP-OCRv5 detect-once OCR, specialist
+routing/fusion, JSON serialization, CLI flow, and contract-shaped export.
 
-Not implemented: production OCR recognizers, layout detection, rendering adapters,
-VLM fallback, API/workers, and benchmark accuracy claims.
+Measured checkpoint and model rationale are in
+`docs/decisions/0002-deterministic-ocr-baseline.md`. It is deliberately not a broad
+accuracy claim. Semantic layout/table/equation understanding, handwriting, VLM
+fallback, table/figure detection, API/workers, and calibrated confidence remain
+incomplete; equation/title classification is currently deterministic and heuristic.

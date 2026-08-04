@@ -4,7 +4,32 @@
 | --- | --- | --- |
 | Pydantic | typed canonical models and validation | MIT; declared dependency |
 | Typer | CLI | MIT; declared dependency |
-| PyMuPDF | optional native PDF inspection adapter | optional dependency; verify upstream licence for deployment profile |
-| Pillow | optional image-dimension inspection | optional runtime import; verify upstream licence for deployment profile |
+| NumPy | OCR image arrays | BSD-3-Clause; OCR extra |
+| psutil | benchmark peak RSS sampling | BSD-3-Clause; OCR extra |
+| huggingface-hub | explicit model asset download script | Apache-2.0; OCR extra |
+| pypdfium2 / PDFium | optional native PDF inspection and rendering | pypdfium2 Apache-2.0/BSD-3-Clause; bundled PDFium and third-party notices also apply |
+| Pillow | image decoding in the OCR extra | HPND |
 
 No model weights, benchmark documents, or copied document content are included.
+
+PyMuPDF was removed before this phase was committed because its AGPL/commercial
+licensing did not fit the repository dependency policy.
+
+# OCR runtime and reviewed model assets
+
+The optional `ocr-paddle` extra uses PaddleOCR and PaddlePaddle under Apache-2.0.
+It also installs their transitive dependencies; exact versions are recorded in
+`uv.lock`.
+
+Reviewed Apache-2.0 model assets (not redistributed in this repository):
+
+- `PaddlePaddle/PP-OCRv5_mobile_det` at
+  `0d63e78e2b680928f6b1747d76a08db6e645efb7`;
+- `PaddlePaddle/arabic_PP-OCRv5_mobile_rec` at
+  `33d91636a65dca87f5562cc48860332ae367ee1b`;
+- `PaddlePaddle/latin_PP-OCRv5_mobile_rec` at
+  `ab2cd5cc5fa6309be2e5acdfe66eca2c2c127d57`.
+
+Weights are fetched from their official Hugging Face repositories only when the
+operator runs `scripts/fetch_models.py`; they are never committed or downloaded
+during installation or tests.

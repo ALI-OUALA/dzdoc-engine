@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import pytest
+
 from dzdoc.exporters import to_prediction
 from dzdoc.native_pdf import NativePage, PdfInspection
 from dzdoc.pipeline import FakePipeline
@@ -21,3 +23,16 @@ def test_prediction_contract_shape():
     assert prediction["schema_version"] == "1.0.0"
     assert prediction["samples"][0]["page"]["page_id"] == document.pages[0].page_id
     assert prediction["samples"][0]["page"]["checksum"]["algorithm"] == "sha256"
+
+
+def test_prediction_rejects_invalid_public_dataset_metadata():
+    document = FakePipeline(pdf_inspector=Inspector()).process_bytes(b"%PDF-1.7", name="x.pdf")
+    with pytest.raises(ValueError, match="dataset_id"):
+        to_prediction(document, dataset_id="not valid", dataset_revision="0.1.0")
+    with pytest.raises(ValueError, match="manifest_checksum"):
+        to_prediction(
+            document,
+            dataset_id="synthetic-smoke",
+            dataset_revision="0.1.0",
+            manifest_checksum="invalid",
+        )
