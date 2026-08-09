@@ -3,7 +3,8 @@
 Status: accepted
 
 DzDoc and DZ-Bench communicate through versioned JSON artifacts, not Python
-imports or shared private modules. DzDoc emits `schema_version`, dataset revision,
+imports or shared private modules. DZ-Bench provides a manifest plus a ground-truth-free
+asset index; generator records and ground truth remain evaluator-side. DzDoc emits `schema_version`, dataset revision,
 coordinate-system metadata, system/run metadata, and page samples containing
 canonical blocks, lines, spans, provenance, confidence, warnings, and checksums.
 

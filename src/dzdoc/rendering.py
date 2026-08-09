@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from .ingestion import DocumentInput, IngestionError
 from .native_pdf import PdfInspectionError
 
@@ -23,7 +25,7 @@ class PdfiumRenderer:
             if page_index >= len(pdf):
                 raise IngestionError("PDF page index is out of range")
             page = pdf[page_index]
-            bitmap = page.render(scale=dpi / 72, rev_byteorder=True)
+            bitmap = page.render(scale=cast(Any, dpi / 72), rev_byteorder=True)
             pil_image = bitmap.to_pil().convert("RGB")
             try:
                 return np.array(pil_image, dtype=np.uint8, copy=True)

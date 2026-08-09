@@ -59,22 +59,14 @@ class PublicBundleRunner:
     def run(
         self,
         manifest_path: str | Path,
-        records_path: str | Path,
+        assets_path: str | Path,
         assets_dir: str | Path,
         output: str | Path,
     ) -> Path:
         started_at = datetime.now(UTC)
         started = time.perf_counter()
         manifest = _validate_manifest(_load_json(manifest_path))
-        by_page = _validate_records(_load_json(records_path))
-        manifest_page_ids = {
-            page["page_id"] for document in manifest["documents"] for page in document["pages"]
-        }
-        unknown_records = set(by_page) - manifest_page_ids
-        if unknown_records:
-            raise BundleError(
-                "records contain unknown page IDs: " + ", ".join(sorted(unknown_records))
-            )
+        by_page = _validate_assets(_load_json(assets_path), manifest)
         try:
             root = Path(assets_dir).resolve(strict=True)
         except OSError as exc:
@@ -122,8 +114,8 @@ class PublicBundleRunner:
 
     def _sample(self, document_id, page, records, root: Path) -> dict[str, Any]:
         started = time.perf_counter()
-        record = records.get(page["page_id"])
-        relative_path = record.get("image_path") if record else None
+        record = records.get((document_id, page["page_id"]))
+        relative_path = record.get("relative_path") if record else None
         if not relative_path:
             return _failure(document_id, page["page_id"], "missing", "asset record missing")
         try:
@@ -141,6 +133,8 @@ class PublicBundleRunner:
         actual = hashlib.sha256(data).hexdigest()
         if actual != expected:
             return _failure(document_id, page["page_id"], "crashed", "asset checksum mismatch")
+        if _image_media_type(data) != record["media_type"]:
+            return _failure(document_id, page["page_id"], "crashed", "asset media type mismatch")
         try:
             with _PeakRss() as memory:
                 source = self.pipeline.ingestor.from_bytes(data, name=path.name)
@@ -196,6 +190,16 @@ def _failure(document_id: str, page_id: str, status: str, message: str) -> dict[
         "page": None,
         "error": {"code": "bundle_asset_error", "message": message, "retryable": False},
     }
+
+
+def _image_media_type(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    return None
 
 
 def _asset_path(root: Path, relative_path: str) -> Path:
@@ -323,20 +327,61 @@ def _validate_manifest(value: Any) -> dict[str, Any]:
     return value
 
 
-def _validate_records(value: Any) -> dict[str, dict[str, str]]:
-    if not isinstance(value, list):
-        raise BundleError("records must be an array")
-    result: dict[str, dict[str, str]] = {}
-    for record in value:
-        if not isinstance(record, dict):
-            raise BundleError("asset records must be objects")
-        _keys(record, {"page_id", "image_path"}, "asset record")
-        page_id = _identifier(record.get("page_id"), "asset record.page_id")
-        if page_id in result:
-            raise BundleError(f"duplicate asset record: {page_id}")
-        if not isinstance(record.get("image_path"), str) or not record["image_path"].strip():
-            raise BundleError(f"asset record {page_id}.image_path must be text")
-        result[page_id] = record
+def _validate_assets(value: Any, manifest: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise BundleError("asset index must be an object")
+    _keys(value, {"schema_version", "dataset_revision", "assets"}, "asset index")
+    if value.get("schema_version") != "1.0.0":
+        raise BundleError("asset index schema version is unsupported")
+    if value.get("dataset_revision") != manifest["dataset_revision"]:
+        raise BundleError("asset index dataset revision does not match manifest")
+    if not isinstance(value.get("assets"), list):
+        raise BundleError("asset index assets must be an array")
+
+    manifest_pages = {
+        (document["document_id"], page["page_id"]): page
+        for document in manifest["documents"]
+        for page in document["pages"]
+    }
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    for asset in value["assets"]:
+        if not isinstance(asset, dict):
+            raise BundleError("page assets must be objects")
+        _keys(
+            asset,
+            {
+                "document_id",
+                "page_id",
+                "media_type",
+                "relative_path",
+                "checksum",
+                "width",
+                "height",
+            },
+            "page asset",
+        )
+        document_id = _identifier(asset.get("document_id"), "page asset.document_id")
+        page_id = _identifier(asset.get("page_id"), "page asset.page_id")
+        key = (document_id, page_id)
+        if key in result:
+            raise BundleError(f"duplicate page asset: {document_id}/{page_id}")
+        page = manifest_pages.get(key)
+        if page is None:
+            raise BundleError(f"asset references unknown page: {document_id}/{page_id}")
+        if asset.get("media_type") not in {"image/png", "image/jpeg", "image/tiff"}:
+            raise BundleError(f"page asset {page_id}.media_type is invalid")
+        if not isinstance(asset.get("relative_path"), str) or not asset["relative_path"].strip():
+            raise BundleError(f"page asset {page_id}.relative_path must be text")
+        _checksum(asset.get("checksum"), f"page asset {page_id}.checksum")
+        _positive_int(asset.get("width"), f"page asset {page_id}.width")
+        _positive_int(asset.get("height"), f"page asset {page_id}.height")
+        if (
+            asset["checksum"] != page["checksum"]
+            or asset["width"] != page["width"]
+            or asset["height"] != page["height"]
+        ):
+            raise BundleError(f"page asset {page_id} does not match manifest metadata")
+        result[key] = asset
     return result
 
 

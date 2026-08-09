@@ -20,7 +20,7 @@ app = typer.Typer(help="Arabic-French document intelligence foundation.")
 @app.command("evaluate-bundle")
 def evaluate_bundle_command(
     manifest: Path = typer.Option(..., exists=True, readable=True),
-    records: Path = typer.Option(..., exists=True, readable=True),
+    assets: Path = typer.Option(..., exists=True, readable=True),
     assets_dir: Path = typer.Option(..., exists=True, file_okay=False),
     output: Path = typer.Option(..., "--output", "-o"),
     recognition_mode: str = typer.Option("routed", "--recognition-mode"),
@@ -38,7 +38,7 @@ def evaluate_bundle_command(
         pipeline = HybridPipeline(
             ocr=PaddleOcrEngine(model_root=model_dir, recognition_mode=recognition_mode)
         )
-        PublicBundleRunner(pipeline).run(manifest, records, assets_dir, output)
+        PublicBundleRunner(pipeline).run(manifest, assets, assets_dir, output)
     except (BundleError, IngestionError, OcrDependencyError, PdfInspectionError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(str(output))

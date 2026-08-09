@@ -37,15 +37,26 @@ $env:DZDOC_MODEL_DIR = (Resolve-Path .models)
 uv run dzdoc process .\scan.pdf --output .\document.json
 ```
 
-For a public DZ-Bench raster bundle, keep the manifest and records JSON artifacts
+Foundation gates run without model downloads:
+
+```powershell
+uv sync --extra dev --extra pdf
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+```
+
+For a public DZ-Bench raster bundle, keep the manifest and ground-truth-free asset index
 at the published contract version and run:
 
 ```powershell
-uv run dzdoc evaluate-bundle --manifest .\manifest.json --records .\records.json --assets-dir .\assets --output .\predictions.json
+uv run dzdoc evaluate-bundle --manifest .\manifest.json --assets .\assets.json --assets-dir . --output .\predictions.json
 ```
 
-The runner validates the manifest, rejects unknown fields and unsafe asset paths,
-hashes each asset, and sends the same verified bytes to the pipeline.
+The runner validates both public artifacts, rejects unknown fields and unsafe paths,
+cross-checks each asset against manifest dimensions/checksum, then sends the same verified
+bytes to the pipeline. Generator records and ground truth never enter the OCR process.
 
 Prediction JSON follows the public `Predictions` contract implemented independently
 by `dz-bench`; this package does not import `dz_bench`.

@@ -64,15 +64,29 @@ def test_public_bundle_runner_preserves_benchmark_identity(tmp_path):
         "reference_sources": [],
         "notes": [],
     }
-    records = [{"page_id": "page-1", "image_path": "images/page.png"}]
+    assets = {
+        "schema_version": "1.0.0",
+        "dataset_revision": manifest["dataset_revision"],
+        "assets": [
+            {
+                "document_id": "doc-1",
+                "page_id": "page-1",
+                "media_type": "image/png",
+                "relative_path": "images/page.png",
+                "checksum": {"algorithm": "sha256", "value": checksum},
+                "width": 8,
+                "height": 8,
+            }
+        ],
+    }
     manifest_path = tmp_path / "manifest.json"
-    records_path = tmp_path / "records.json"
+    assets_path = tmp_path / "assets.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    records_path.write_text(json.dumps(records), encoding="utf-8")
+    assets_path.write_text(json.dumps(assets), encoding="utf-8")
     output = tmp_path / "predictions.json"
 
     PublicBundleRunner(HybridPipeline(ocr=EmptyOcr())).run(
-        manifest_path, records_path, tmp_path, output
+        manifest_path, assets_path, tmp_path, output
     )
 
     prediction = json.loads(output.read_text(encoding="utf-8"))
@@ -84,11 +98,20 @@ def test_public_bundle_runner_preserves_benchmark_identity(tmp_path):
     assert sample["runtime_ms"] >= 0
     assert sample["peak_memory_mb"] > 0
 
+    assets["assets"][0]["media_type"] = "image/jpeg"
+    assets_path.write_text(json.dumps(assets), encoding="utf-8")
+    PublicBundleRunner(HybridPipeline(ocr=EmptyOcr())).run(
+        manifest_path, assets_path, tmp_path, output
+    )
+    mismatch = json.loads(output.read_text(encoding="utf-8"))["samples"][0]
+    assert mismatch["status"] == "crashed"
+    assert "media type" in mismatch["error"]["message"]
+
 
 def test_public_bundle_runner_rejects_path_traversal(tmp_path):
     checksum = "0" * 64
     manifest_path = tmp_path / "manifest.json"
-    records_path = tmp_path / "records.json"
+    assets_path = tmp_path / "assets.json"
     manifest_path.write_text(
         json.dumps(
             {
@@ -131,13 +154,29 @@ def test_public_bundle_runner_rejects_path_traversal(tmp_path):
         ),
         encoding="utf-8",
     )
-    records_path.write_text(
-        json.dumps([{"page_id": "page-1", "image_path": "../outside.png"}]),
+    assets_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "dataset_revision": {"dataset_id": "fixture", "revision": "1.0.0"},
+                "assets": [
+                    {
+                        "document_id": "doc-1",
+                        "page_id": "page-1",
+                        "media_type": "image/png",
+                        "relative_path": "../outside.png",
+                        "checksum": {"algorithm": "sha256", "value": checksum},
+                        "width": 1,
+                        "height": 1,
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     output = tmp_path / "out.json"
     PublicBundleRunner(HybridPipeline(ocr=EmptyOcr())).run(
-        manifest_path, records_path, tmp_path, output
+        manifest_path, assets_path, tmp_path, output
     )
     result = json.loads(output.read_text(encoding="utf-8"))
     assert result["samples"][0]["status"] == "missing"

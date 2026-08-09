@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 class IngestionError(ValueError):
@@ -18,7 +19,7 @@ class IngestionError(ValueError):
 class DocumentInput:
     name: str
     data: bytes
-    kind: str
+    kind: Literal["pdf", "image"]
     sha256: str
 
     @property
@@ -26,7 +27,7 @@ class DocumentInput:
         return len(self.data)
 
 
-def _kind_for_signature(data: bytes) -> str | None:
+def _kind_for_signature(data: bytes) -> Literal["pdf", "image"] | None:
     if data.startswith(b"%PDF-"):
         return "pdf"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):

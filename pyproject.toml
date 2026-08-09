@@ -16,6 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "numpy>=2,<3",
+  "pillow>=10,<13",
+  "psutil>=7,<8",
+  "pyright>=1.1.408,<2",
   "pytest>=8,<9",
   "ruff>=0.6,<1",
 ]
@@ -46,3 +50,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"

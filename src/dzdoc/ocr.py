@@ -200,7 +200,10 @@ class PaddleOcrEngine:
     def _classes(self):
         os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         try:
-            from paddleocr import TextDetection, TextRecognition
+            from paddleocr import (  # pyright: ignore[reportMissingImports] -- optional extra
+                TextDetection,
+                TextRecognition,
+            )
         except ImportError as exc:
             raise OcrDependencyError("install the optional dzdoc[ocr-paddle] extra") from exc
         return TextDetection, TextRecognition
@@ -237,7 +240,9 @@ class PaddleOcrEngine:
             )
         payload = self._detector.predict(image, batch_size=1)[0].json["res"]
         return [
-            DetectedRegion(tuple(tuple(map(float, point)) for point in polygon), float(score))
+            DetectedRegion(
+                tuple((float(point[0]), float(point[1])) for point in polygon), float(score)
+            )
             for polygon, score in zip(payload["dt_polys"], payload["dt_scores"], strict=True)
         ]
 
@@ -287,7 +292,7 @@ def _crop(image: Any, region: DetectedRegion) -> Any:
     """Perspective-normalize one quadrilateral without a second detection pass."""
 
     try:
-        import cv2
+        import cv2  # pyright: ignore[reportMissingImports] -- optional OCR extra
         import numpy as np
     except ImportError as exc:
         raise OcrDependencyError("OpenCV and NumPy are required by dzdoc[ocr-paddle]") from exc

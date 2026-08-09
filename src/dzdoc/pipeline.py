@@ -33,6 +33,8 @@ from .ocr import (
 from .rendering import PdfiumRenderer, decode_image
 from .text import classify_text, normalization_warnings, normalize_display, normalize_search
 
+type MetadataValue = str | int | float | bool
+
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
@@ -92,7 +94,7 @@ class HybridPipeline:
                 raise IngestionError(f"PDF exceeds {self.config.max_pages} page limit")
             if inspection.page_count != len(inspection.pages):
                 raise IngestionError("PDF inspection returned an inconsistent page count")
-            built_pages = []
+            built_pages: list[Page] = []
             for native in inspection.pages:
                 if native.quality.accepted:
                     built_pages.append(self._page_from_native(source, document_id, native))
@@ -106,22 +108,22 @@ class HybridPipeline:
                     built_pages.append(
                         self._page_from_ocr(source, document_id, native.page_index, image)
                     )
-            pages = tuple(built_pages)
-            metadata = {
+            pages = built_pages
+            metadata: dict[str, MetadataValue] = {
                 "native_pdf_adapter": inspection.adapter,
                 "native_pdf_adapter_version": inspection.adapter_version,
                 "native_pages": sum(page.provenance.kind == "native_pdf" for page in pages),
                 "ocr_pages": sum(page.provenance.kind == "ocr" for page in pages),
             }
         else:
-            pages = (
+            pages = [
                 self._page_from_ocr(
                     source,
                     document_id,
                     0,
                     decode_image(source, max_pixels=self.config.max_page_pixels),
                 ),
-            )
+            ]
             metadata = {"native_pages": 0, "ocr_pages": 1}
         metadata["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
         if metadata["ocr_pages"]:

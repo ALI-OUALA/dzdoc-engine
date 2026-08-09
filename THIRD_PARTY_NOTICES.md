@@ -4,11 +4,12 @@
 | --- | --- | --- |
 | Pydantic | typed canonical models and validation | MIT; declared dependency |
 | Typer | CLI | MIT; declared dependency |
-| NumPy | OCR image arrays | BSD-3-Clause; OCR extra |
-| psutil | benchmark peak RSS sampling | BSD-3-Clause; OCR extra |
+| NumPy | OCR image arrays and tests | BSD-3-Clause; OCR/dev extras |
+| psutil | benchmark peak RSS sampling | BSD-3-Clause; OCR/dev extras |
 | huggingface-hub | explicit model asset download script | Apache-2.0; OCR extra |
 | pypdfium2 / PDFium | optional native PDF inspection and rendering | pypdfium2 Apache-2.0/BSD-3-Clause; bundled PDFium and third-party notices also apply |
-| Pillow | image decoding in the OCR extra | HPND |
+| Pillow | image decoding and tests | HPND; OCR/dev extras |
+| Pyright | static type checking | MIT; development dependency |
 
 No model weights, benchmark documents, or copied document content are included.
 
