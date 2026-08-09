@@ -151,12 +151,16 @@ def test_settings_from_environment_uses_real_defaults(monkeypatch) -> None:
         "PORT",
         "DZDOC_PUBLIC_BASE_URL",
         "DZDOC_BOOTSTRAP_TOKEN",
+        "DZDOC_EMBEDDED_WORKER",
         "DZDOC_ENVIRONMENT",
     ):
         monkeypatch.delenv(name, raising=False)
     value = ServiceSettings.from_env()
     assert value.database_url == "sqlite:///./.data/dzdoc.db"
     assert value.max_upload_bytes == 50 * 1024 * 1024
+    assert value.embedded_worker is False
+    monkeypatch.setenv("DZDOC_EMBEDDED_WORKER", "true")
+    assert ServiceSettings.from_env().embedded_worker is True
 
 
 def test_result_is_valid_utf8_json(tmp_path: Path) -> None:

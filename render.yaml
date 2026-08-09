@@ -1,10 +1,37 @@
 services:
   - type: web
+    runtime: python
+    name: dzdoc-api-demo
+    plan: free
+    region: frankfurt
+    buildCommand: pip install uv && uv sync --frozen --no-dev --extra service --extra pdf
+    startCommand: uv run dzdoc-api
+    healthCheckPath: /readyz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.9
+      - key: DZDOC_ENVIRONMENT
+        value: production
+      - key: DZDOC_DATABASE_URL
+        value: sqlite:////tmp/dzdoc.db
+      - key: DZDOC_OBJECT_ROOT
+        value: /tmp/dzdoc-objects
+      - key: DZDOC_EMBEDDED_WORKER
+        value: "true"
+      - key: DZDOC_ALLOW_ORIGINS
+        value: https://dzdoc-platform.onrender.com
+      - key: DZDOC_BOOTSTRAP_TOKEN
+        generateValue: true
+
+  - type: web
     runtime: static
-    name: dzdoc-review-demo
+    name: dzdoc-platform
     buildCommand: cd apps/web && npm ci && npm run build
     staticPublishPath: apps/web/dist
     pullRequestPreviewsEnabled: true
+    envVars:
+      - key: VITE_DZDOC_API_URL
+        value: https://dzdoc-api-demo.onrender.com
     headers:
       - path: /*
         name: X-Content-Type-Options
@@ -12,6 +39,9 @@ services:
       - path: /*
         name: Referrer-Policy
         value: no-referrer
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=()
     routes:
       - type: rewrite
         source: /*

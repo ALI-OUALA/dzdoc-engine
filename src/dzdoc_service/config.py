@@ -25,6 +25,7 @@ class ServiceSettings:
     bootstrap_token: str | None = None
     environment: str = "development"
     allow_origins: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173")
+    embedded_worker: bool = False
 
     def __post_init__(self) -> None:
         if self.max_upload_bytes <= 0 or self.retention_days < 0:
@@ -65,4 +66,6 @@ class ServiceSettings:
             bootstrap_token=os.getenv("DZDOC_BOOTSTRAP_TOKEN"),
             environment=os.getenv("DZDOC_ENVIRONMENT", defaults.environment),
             allow_origins=origins,
+            embedded_worker=os.getenv("DZDOC_EMBEDDED_WORKER", "false").lower()
+            in {"1", "true", "yes"},
         )

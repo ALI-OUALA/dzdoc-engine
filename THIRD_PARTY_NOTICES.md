@@ -13,7 +13,12 @@
 | FastAPI / Starlette / Uvicorn | optional HTTP service | MIT / BSD-3-Clause; service extra |
 | SQLAlchemy / psycopg | metadata, queue, PostgreSQL adapter | MIT / LGPL-3.0 with linking exception; service extra |
 | boto3 | optional S3-compatible object store | Apache-2.0; s3 extra |
-| React / Vite / Lucide | review web application and icons | MIT / MIT / ISC |
+| React / React Router / Vite | review web application and routing | MIT / MIT / MIT |
+| shadcn / Radix UI / Tailwind CSS | accessible UI primitives and styling | MIT / MIT / MIT |
+| Phosphor Icons | interface icons | MIT |
+| GSAP | restrained landing-page scroll animation | GSAP Standard "no charge" license |
+| Geist | web typography | SIL Open Font License 1.1 |
+| Playwright | local browser and visual verification | Apache-2.0 |
 | PostgreSQL / nginx | operator-supplied deployment services | PostgreSQL / BSD-2-Clause; not linked into project code |
 
 No model weights, benchmark documents, or copied document content are included.

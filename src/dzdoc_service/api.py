@@ -1,6 +1,7 @@
 """Versioned FastAPI surface for hosted and on-premise DzDoc deployments."""
 
 import hmac
+import threading
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -13,6 +14,7 @@ from .config import ServiceSettings
 from .db import Database, Job, StoredDocument
 from .service import DocumentService, Principal, ServiceError
 from .storage import ObjectStore, build_object_store
+from .worker import WebhookDispatcher, Worker
 
 
 class KeyCreate(BaseModel):
@@ -76,7 +78,27 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         db.create_schema()
-        yield
+        stop = threading.Event()
+        thread: threading.Thread | None = None
+        if config.embedded_worker:
+            worker = Worker(db, objects, config)
+            webhooks = WebhookDispatcher(db)
+
+            def run_worker() -> None:
+                while not stop.is_set():
+                    processed = worker.run_once()
+                    webhooks.run_once()
+                    if processed is None:
+                        stop.wait(0.5)
+
+            thread = threading.Thread(target=run_worker, name="dzdoc-embedded-worker", daemon=True)
+            thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=5)
 
     app = FastAPI(
         title="DzDoc API",
