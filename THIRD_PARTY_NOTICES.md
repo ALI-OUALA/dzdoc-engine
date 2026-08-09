@@ -30,6 +30,8 @@ Reviewed Apache-2.0 model assets (not redistributed in this repository):
   `33d91636a65dca87f5562cc48860332ae367ee1b`;
 - `PaddlePaddle/latin_PP-OCRv5_mobile_rec` at
   `ab2cd5cc5fa6309be2e5acdfe66eca2c2c127d57`.
+- `PaddlePaddle/PaddleOCR-VL-1.6` at
+  `c5630abae1d940eafe0697512a0325494b02ab42` (optional guarded fallback).
 
 Weights are fetched from their official Hugging Face repositories only when the
 operator runs `scripts/fetch_models.py`; they are never committed or downloaded

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+from .fallback import validate_fallback
 from .ingestion import DocumentInput, IngestionError, SecureIngestor
 from .layout import classify_block_type
 from .models import (
@@ -18,6 +21,7 @@ from .models import (
     Confidence,
     Document,
     Page,
+    ProcessingEvent,
     ProcessingWarning,
     Provenance,
     RecognitionAlternative,
@@ -26,7 +30,9 @@ from .models import (
 )
 from .native_pdf import NativePage, NativePdfInspector, PdfInspection
 from .ocr import (
+    FusedRecognition,
     PaddleOcrEngine,
+    candidate_score,
     fuse_recognitions,
     order_recognized_regions,
 )
@@ -44,6 +50,11 @@ class PipelineConfig:
     ambiguity_margin: float = 0.08
     max_pages: int = 200
     max_page_pixels: int = 40_000_000
+    fallback_enabled: bool = False
+    fallback_confidence_threshold: float = 0.58
+    fallback_minimum_gain: float = 0.08
+    fallback_max_regions_per_page: int = 1
+    fallback_max_output_chars: int = 4096
 
     def __post_init__(self) -> None:
         if self.max_bytes <= 0 or self.max_pages <= 0 or self.max_page_pixels <= 0:
@@ -52,6 +63,12 @@ class PipelineConfig:
             raise ValueError("render_dpi must be positive")
         if not 0 <= self.ambiguity_margin <= 1:
             raise ValueError("ambiguity_margin must be between 0 and 1")
+        if not 0 <= self.fallback_confidence_threshold <= 1:
+            raise ValueError("fallback confidence threshold must be between 0 and 1")
+        if not 0 <= self.fallback_minimum_gain <= 1:
+            raise ValueError("fallback minimum gain must be between 0 and 1")
+        if self.fallback_max_regions_per_page <= 0 or self.fallback_max_output_chars <= 0:
+            raise ValueError("fallback limits must be positive")
 
 
 class HybridPipeline:
@@ -64,12 +81,14 @@ class HybridPipeline:
         pdf_inspector=None,
         renderer=None,
         ocr=None,
+        fallback=None,
     ) -> None:
         self.config = config or PipelineConfig()
         self.ingestor = SecureIngestor(max_bytes=self.config.max_bytes)
         self.pdf_inspector = pdf_inspector or NativePdfInspector(max_pages=self.config.max_pages)
         self.renderer = renderer or PdfiumRenderer()
         self._ocr = ocr
+        self.fallback = fallback
 
     @property
     def ocr(self):
@@ -126,6 +145,16 @@ class HybridPipeline:
             ]
             metadata = {"native_pages": 0, "ocr_pages": 1}
         metadata["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        events = [event for page in pages for event in page.events]
+        if events:
+            metadata["vlm_attempted_regions"] = len(events)
+            metadata["vlm_accepted_regions"] = sum(event.status == "accepted" for event in events)
+            metadata["vlm_rejected_regions"] = sum(event.status == "rejected" for event in events)
+            metadata["vlm_failed_regions"] = sum(event.status == "failed" for event in events)
+            metadata["vlm_adapter"] = getattr(self.fallback, "name", "unknown")
+            metadata["vlm_adapter_version"] = getattr(self.fallback, "version", "unknown")
+            metadata["vlm_model"] = getattr(self.fallback, "model_name", "unknown")
+            metadata["vlm_model_revision"] = getattr(self.fallback, "model_revision", "unknown")
         if metadata["ocr_pages"]:
             ocr = self.ocr
             metadata["ocr_adapter"] = getattr(ocr, "name", type(ocr).__name__)
@@ -152,21 +181,39 @@ class HybridPipeline:
         ocr = self.ocr
         detected = list(ocr.detect(image) or [])
         recognized = []
-        for region in detected:
+        events: list[ProcessingEvent] = []
+        fallback_attempts = 0
+        for region_index, region in enumerate(detected):
             candidates = [
                 candidate
                 for candidate in (ocr.recognize(image, region) or [])
                 if candidate.text.strip()
             ]
             if candidates:
-                recognized.append(
-                    (
-                        region,
-                        fuse_recognitions(
-                            candidates, ambiguity_margin=self.config.ambiguity_margin
-                        ),
-                    )
-                )
+                fused = fuse_recognitions(candidates, ambiguity_margin=self.config.ambiguity_margin)
+                trigger = _fallback_trigger(fused, self.config)
+                if trigger and self.fallback is not None and self.config.fallback_enabled:
+                    if fallback_attempts >= self.config.fallback_max_regions_per_page:
+                        events.append(
+                            _fallback_event(
+                                page_index,
+                                region_index,
+                                self.fallback,
+                                "skipped",
+                                trigger,
+                                fused.confidence,
+                                None,
+                                0.0,
+                                {"reason": "page_region_limit"},
+                            )
+                        )
+                    else:
+                        fallback_attempts += 1
+                        fused, event = self._run_fallback(
+                            image, region, page_index, region_index, fused, trigger
+                        )
+                        events.append(event)
+                recognized.append((region, fused))
         ordered = order_recognized_regions(recognized)
         blocks: list[Block] = []
         reading_order: list[str] = []
@@ -175,17 +222,28 @@ class HybridPipeline:
             normalized = normalize_display(raw)
             language, script, direction = classify_text(normalized)
             provenance = Provenance(
-                kind="ocr",
+                kind=fused.selected.kind,
                 source=fused.selected.adapter,
-                version=getattr(self.ocr, "version", "unknown"),
-                model=fused.selected.adapter,
+                version=(
+                    getattr(self.fallback, "version", "unknown")
+                    if fused.selected.kind == "vlm"
+                    else getattr(self.ocr, "version", "unknown")
+                ),
+                model=fused.selected.model or fused.selected.adapter,
                 stage="recognition",
-                details={"detection_confidence": round(region.confidence, 6)},
+                details={
+                    "detection_confidence": round(region.confidence, 6),
+                    **(fused.selected.details or {}),
+                },
             )
             confidence = Confidence(
                 score=max(0.0, min(1.0, fused.confidence * region.confidence)),
                 calibrated=False,
-                method="recognizer_script_detection_fusion",
+                method=(
+                    "guarded_vlm_validation"
+                    if fused.selected.kind == "vlm"
+                    else "recognizer_script_detection_fusion"
+                ),
             )
             alternatives = [
                 RecognitionAlternative(
@@ -195,11 +253,16 @@ class HybridPipeline:
                         score=value.confidence, calibrated=False, method="recognizer_native"
                     ),
                     provenance=Provenance(
-                        kind="ocr",
+                        kind=value.kind,
                         source=value.adapter,
-                        version=getattr(self.ocr, "version", "unknown"),
-                        model=value.adapter,
+                        version=(
+                            getattr(self.fallback, "version", "unknown")
+                            if value.kind == "vlm"
+                            else getattr(self.ocr, "version", "unknown")
+                        ),
+                        model=value.model or value.adapter,
                         stage="candidate_fusion",
+                        details=value.details or {},
                     ),
                     reason="non_selected_candidate",
                 )
@@ -281,7 +344,84 @@ class HybridPipeline:
                 details={"detector_passes": 1, "region_count": len(blocks)},
             ),
             warnings=warnings,
+            events=events,
         )
+
+    def _run_fallback(
+        self, image, region, page_index: int, region_index: int, fused, trigger: str
+    ) -> tuple[FusedRecognition, ProcessingEvent]:
+        started = time.perf_counter()
+        before = fused.confidence
+        try:
+            assert self.fallback is not None
+            result = self.fallback.resolve(image, region)
+            decision = validate_fallback(
+                fused,
+                result,
+                adapter=getattr(self.fallback, "name", type(self.fallback).__name__),
+                model=getattr(self.fallback, "model_name", "unknown"),
+                model_revision=getattr(self.fallback, "model_revision", "unknown"),
+                max_output_chars=self.config.fallback_max_output_chars,
+                minimum_gain=self.config.fallback_minimum_gain,
+            )
+            elapsed = (time.perf_counter() - started) * 1000
+            details: dict[str, MetadataValue] = {
+                "reason": decision.reason,
+                "prompt_label": result.prompt_label,
+                "raw_output_json": json.dumps(
+                    result.raw_output, ensure_ascii=False, sort_keys=True
+                )[: self.config.fallback_max_output_chars],
+                **result.decoding,
+            }
+            if not decision.accepted or decision.recognition is None:
+                return fused, _fallback_event(
+                    page_index,
+                    region_index,
+                    self.fallback,
+                    "rejected",
+                    trigger,
+                    before,
+                    before,
+                    elapsed,
+                    details,
+                )
+            selected = decision.recognition
+            warning = ProcessingWarning(
+                code="vlm_fallback_used",
+                message="Validated region-level VLM output replaced low-confidence OCR.",
+                severity="info",
+                stage="guarded_vlm_fallback",
+            )
+            updated = FusedRecognition(
+                selected=selected,
+                alternatives=(fused.selected, *fused.alternatives),
+                confidence=candidate_score(selected),
+                warnings=(*fused.warnings, warning),
+            )
+            return updated, _fallback_event(
+                page_index,
+                region_index,
+                self.fallback,
+                "accepted",
+                trigger,
+                before,
+                updated.confidence,
+                elapsed,
+                details,
+            )
+        except Exception as exc:
+            elapsed = (time.perf_counter() - started) * 1000
+            return fused, _fallback_event(
+                page_index,
+                region_index,
+                self.fallback,
+                "failed",
+                trigger,
+                before,
+                before,
+                elapsed,
+                {"reason": type(exc).__name__},
+            )
 
     def _page_from_native(
         self, source: DocumentInput, document_id: str, native: NativePage
@@ -418,6 +558,44 @@ def _clamp_bbox(bbox: BoundingBox, width: int, height: int) -> BoundingBox:
     right = min(float(width), max(x + 1.0, bbox.x + bbox.width))
     bottom = min(float(height), max(y + 1.0, bbox.y + bbox.height))
     return BoundingBox(x=x, y=y, width=max(1.0, right - x), height=max(1.0, bottom - y))
+
+
+def _fallback_trigger(fused: FusedRecognition, config: PipelineConfig) -> str | None:
+    if fused.confidence < config.fallback_confidence_threshold:
+        return "low_confidence"
+    warning_codes = {warning.code for warning in fused.warnings}
+    if "digit_disagreement" in warning_codes:
+        return "digit_disagreement"
+    if "ambiguous_recognition" in warning_codes:
+        return "ambiguous_recognition"
+    return None
+
+
+def _fallback_event(
+    page_index: int,
+    region_index: int,
+    fallback,
+    status: Literal["attempted", "accepted", "rejected", "failed", "skipped"],
+    trigger: str,
+    confidence_before: float,
+    confidence_after: float | None,
+    duration_ms: float,
+    details: dict[str, MetadataValue],
+) -> ProcessingEvent:
+    return ProcessingEvent(
+        event_id=f"p{page_index:04d}-fallback-{region_index:04d}",
+        stage="guarded_vlm_fallback",
+        status=status,
+        trigger=trigger,
+        adapter_name=getattr(fallback, "name", type(fallback).__name__),
+        adapter_version=getattr(fallback, "version", "unknown"),
+        model_name=getattr(fallback, "model_name", None),
+        model_revision=getattr(fallback, "model_revision", None),
+        confidence_before=confidence_before,
+        confidence_after=confidence_after,
+        duration_ms=duration_ms,
+        details=details,
+    )
 
 
 # Compatibility for Phase 1 callers. New code should use HybridPipeline.

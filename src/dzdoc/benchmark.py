@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .contracts import DocumentPack
 from .exporters import write_json
-from .models import Checksum
+from .models import Checksum, Document
 from .pipeline import HybridPipeline
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
@@ -53,8 +54,14 @@ class _PeakRss:
 
 
 class PublicBundleRunner:
-    def __init__(self, pipeline: HybridPipeline | None = None) -> None:
+    def __init__(
+        self,
+        pipeline: HybridPipeline | None = None,
+        *,
+        document_pack: DocumentPack | None = None,
+    ) -> None:
         self.pipeline = pipeline or HybridPipeline()
+        self.document_pack = document_pack
 
     def run(
         self,
@@ -78,13 +85,14 @@ class PublicBundleRunner:
             for document in manifest["documents"]:
                 for page in document["pages"]:
                     samples.append(self._sample(document["document_id"], page, by_page, root))
+        extractions = self._extractions(manifest, samples)
         finished_at = datetime.now(UTC)
         duration_ms = (time.perf_counter() - started) * 1000
         ocr = getattr(self.pipeline, "_ocr", None)
         pipeline_metadata = getattr(ocr, "metadata", None)
         model_name = pipeline_metadata.upstream_model if pipeline_metadata else None
         payload = {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "dataset_revision": manifest["dataset_revision"],
             "coordinate_system": manifest["coordinate_system"],
             "system": {
@@ -108,9 +116,41 @@ class PublicBundleRunner:
                 "duration_ms": duration_ms,
             },
             "samples": samples,
+            "document_extractions": extractions,
         }
         payload["system"]["runtime"]["peak_rss_mb"] = round(memory.peak / 1048576, 3)
         return write_json(payload, output)
+
+    def _extractions(
+        self, manifest: dict[str, Any], samples: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if self.document_pack is None:
+            return []
+        by_document = {document["document_id"]: document for document in manifest["documents"]}
+        result: list[dict[str, Any]] = []
+        for document_id, manifest_document in by_document.items():
+            pages = [
+                sample["page"]
+                for sample in samples
+                if sample["document_id"] == document_id and sample["status"] == "success"
+            ]
+            if not pages:
+                continue
+            document = Document(
+                document_id=document_id,
+                source_name=f"{document_id}.benchmark",
+                source_kind="image",
+                source_checksum=Checksum.model_validate(manifest_document["checksum"]),
+                pages=pages,
+            )
+            extraction = self.document_pack.extract(document)
+            payload = (
+                extraction.model_dump(mode="json")
+                if hasattr(extraction, "model_dump")
+                else extraction
+            )
+            result.append(payload)
+        return result
 
     def _sample(self, document_id, page, records, root: Path) -> dict[str, Any]:
         started = time.perf_counter()
@@ -331,7 +371,8 @@ def _validate_assets(value: Any, manifest: dict[str, Any]) -> dict[tuple[str, st
     if not isinstance(value, dict):
         raise BundleError("asset index must be an object")
     _keys(value, {"schema_version", "dataset_revision", "assets"}, "asset index")
-    if value.get("schema_version") != "1.0.0":
+    version = value.get("schema_version")
+    if not isinstance(version, str) or version.split(".", 1)[0] != "1":
         raise BundleError("asset index schema version is unsupported")
     if value.get("dataset_revision") != manifest["dataset_revision"]:
         raise BundleError("asset index dataset revision does not match manifest")

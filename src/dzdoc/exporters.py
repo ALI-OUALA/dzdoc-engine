@@ -90,6 +90,9 @@ def to_prediction(
             }
             for page in document.pages
         ],
+        "document_extractions": [
+            extraction.model_dump(mode="json") for extraction in document.extractions
+        ],
     }
 
 

@@ -31,5 +31,13 @@ OCR_ASSETS = (
     ),
 )
 
+VLM_ASSETS = (
+    ModelAsset(
+        "PaddleOCR-VL-1.6",
+        "PaddlePaddle/PaddleOCR-VL-1.6",
+        "c5630abae1d940eafe0697512a0325494b02ab42",
+    ),
+)
+
 
 ASSET_BY_NAME = {asset.name: asset for asset in OCR_ASSETS}

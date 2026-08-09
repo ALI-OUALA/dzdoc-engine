@@ -20,7 +20,8 @@ class Inspector:
 def test_prediction_contract_shape():
     document = FakePipeline(pdf_inspector=Inspector()).process_bytes(b"%PDF-1.7", name="x.pdf")
     prediction = to_prediction(document, dataset_id="synthetic-smoke", dataset_revision="0.1.0")
-    assert prediction["schema_version"] == "1.0.0"
+    assert prediction["schema_version"] == "1.1.0"
+    assert prediction["document_extractions"] == []
     assert prediction["samples"][0]["page"]["page_id"] == document.pages[0].page_id
     assert prediction["samples"][0]["page"]["checksum"]["algorithm"] == "sha256"
 

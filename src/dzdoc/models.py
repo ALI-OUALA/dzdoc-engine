@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 
 Identifier = Annotated[
     str,
@@ -133,6 +133,21 @@ class ProcessingError(ContractModel):
     retryable: bool = False
 
 
+class ProcessingEvent(ContractModel):
+    event_id: Identifier
+    stage: str = Field(min_length=1)
+    status: Literal["attempted", "accepted", "rejected", "failed", "skipped"]
+    trigger: str = Field(min_length=1)
+    adapter_name: str = Field(min_length=1)
+    adapter_version: str = Field(min_length=1)
+    model_name: str | None = None
+    model_revision: str | None = None
+    confidence_before: float | None = Field(default=None, ge=0, le=1)
+    confidence_after: float | None = Field(default=None, ge=0, le=1)
+    duration_ms: float | None = Field(default=None, ge=0)
+    details: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+
 class Provenance(ContractModel):
     kind: Literal[
         "human_annotation",
@@ -215,6 +230,7 @@ class Page(ContractModel):
     reading_order: list[Identifier] = Field(default_factory=list)
     provenance: Provenance
     warnings: list[ProcessingWarning] = Field(default_factory=list)
+    events: list[ProcessingEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_reading_order(self) -> Page:
@@ -227,6 +243,34 @@ class Page(ContractModel):
         return self
 
 
+class ValidationResult(ContractModel):
+    rule: Identifier
+    status: Literal["pass", "fail", "review"]
+    message: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class StructuredField(ContractModel):
+    field_id: Identifier
+    field_name: str = Field(min_length=1, max_length=200)
+    value: str
+    normalized_value: str
+    value_type: Literal["string", "date", "identifier", "decimal", "currency"]
+    confidence: Confidence
+    page_id: Identifier | None = None
+    bbox: BoundingBox | None = None
+    provenance: Provenance
+    warnings: list[ProcessingWarning] = Field(default_factory=list)
+
+
+class DocumentExtraction(ContractModel):
+    document_id: Identifier
+    schema_name: Identifier
+    schema_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    fields: list[StructuredField] = Field(default_factory=list)
+    validations: list[ValidationResult] = Field(default_factory=list)
+
+
 class Document(ContractModel):
     schema_version: str = Field(default=SCHEMA_VERSION, pattern=r"^\d+\.\d+\.\d+$")
     document_id: Identifier
@@ -236,6 +280,7 @@ class Document(ContractModel):
     coordinate_system: CoordinateSystem = Field(default_factory=CoordinateSystem)
     pages: list[Page] = Field(min_length=1)
     pipeline_version: str = SCHEMA_VERSION
+    extractions: list[DocumentExtraction] = Field(default_factory=list)
     warnings: list[ProcessingWarning] = Field(default_factory=list)
     errors: list[ProcessingError] = Field(default_factory=list)
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)

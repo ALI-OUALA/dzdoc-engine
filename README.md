@@ -13,6 +13,11 @@ Current deterministic foundation provides:
 - Arabic-first region routing to pinned Arabic/Latin PP-OCRv5 recognizers;
 - deterministic candidate fusion, digit disagreement warnings, alternatives,
   provenance, confidence, and RTL/LTR geometric reading order;
+- a disabled-by-default, region-capped PaddleOCR-VL-1.6 fallback whose prompt,
+  immutable model revision, decoding, raw response, trigger, decision, and latency
+  are retained as processing events;
+- an Algerian invoice pack for supplier/buyer, invoice number/date, NIF, NIS, RC,
+  line items, HT, TVA, TTC, currency, source boxes, confidence, and arithmetic checks;
 - JSON export and a neutral DZ-Bench `Predictions` artifact.
 
 No model weight is bundled or downloaded at install/test time.
@@ -35,6 +40,7 @@ uv sync --extra pdf --extra ocr-paddle --extra dev
 uv run python scripts/fetch_models.py --output .models
 $env:DZDOC_MODEL_DIR = (Resolve-Path .models)
 uv run dzdoc process .\scan.pdf --output .\document.json
+uv run dzdoc extract-invoice .\invoice.pdf --output .\invoice.json --model-dir .models
 ```
 
 Foundation gates run without model downloads:
@@ -54,6 +60,10 @@ at the published contract version and run:
 uv run dzdoc evaluate-bundle --manifest .\manifest.json --assets .\assets.json --assets-dir . --output .\predictions.json
 ```
 
+Structured invoice evaluation is opt-in with `--document-pack invoice-dz`. The VLM
+fallback is also opt-in and requires a reviewed local model directory through
+`--vlm-model-dir`; no remote document upload or implicit weight download occurs.
+
 The runner validates both public artifacts, rejects unknown fields and unsafe paths,
 cross-checks each asset against manifest dimensions/checksum, then sends the same verified
 bytes to the pipeline. Generator records and ground truth never enter the OCR process.
@@ -67,8 +77,8 @@ Implemented and tested: canonical models, byte/page/pixel ingestion limits, nati
 text quality routing, selective rendering, real PP-OCRv5 detect-once OCR, specialist
 routing/fusion, JSON serialization, CLI flow, and contract-shaped export.
 
-Measured checkpoint and model rationale are in
-`docs/decisions/0002-deterministic-ocr-baseline.md`. It is deliberately not a broad
-accuracy claim. Semantic layout/table/equation understanding, handwriting, VLM
-fallback, table/figure detection, API/workers, and calibrated confidence remain
-incomplete; equation/title classification is currently deterministic and heuristic.
+Measured checkpoints and model rationale are in
+`docs/decisions/0002-deterministic-ocr-baseline.md` and
+`docs/benchmarks/invoice-dz-2026-08-09.md`. They are deliberately not broad accuracy
+claims. Table reconstruction, diagram/equation semantics, handwriting, API/workers,
+and calibrated confidence remain incomplete; layout classification is heuristic.

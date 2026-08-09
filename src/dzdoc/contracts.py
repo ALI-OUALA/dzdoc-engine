@@ -81,7 +81,7 @@ class VlmFallback(Protocol):
 class DocumentPack(Protocol):
     name: str
 
-    def extract(self, document: Document) -> dict[str, Any]: ...
+    def extract(self, document: Document) -> Any: ...
 
 
 class Exporter(Protocol):

@@ -8,11 +8,13 @@ from pathlib import Path
 import typer
 
 from .benchmark import BundleError, PublicBundleRunner
+from .document_packs.invoice_dz import InvoiceDzPack
 from .exporters import export_document, export_prediction
 from .ingestion import IngestionError, SecureIngestor
 from .native_pdf import PdfInspectionError
 from .ocr import OcrDependencyError, PaddleOcrEngine
-from .pipeline import HybridPipeline
+from .pipeline import HybridPipeline, PipelineConfig
+from .vlm import PaddleOcrVlFallback
 
 app = typer.Typer(help="Arabic-French document intelligence foundation.")
 
@@ -31,14 +33,22 @@ def evaluate_bundle_command(
         file_okay=False,
         help="Directory containing the reviewed OCR assets; defaults to DZDOC_MODEL_DIR.",
     ),
+    document_pack: str | None = typer.Option(None, "--document-pack"),
+    vlm_model_dir: Path | None = typer.Option(
+        None, "--vlm-model-dir", exists=True, file_okay=False
+    ),
 ) -> None:
     """Process a public DZ-Bench raster bundle without importing DZ-Bench."""
 
     try:
+        fallback = PaddleOcrVlFallback(vlm_model_dir) if vlm_model_dir else None
         pipeline = HybridPipeline(
-            ocr=PaddleOcrEngine(model_root=model_dir, recognition_mode=recognition_mode)
+            PipelineConfig(fallback_enabled=fallback is not None),
+            ocr=PaddleOcrEngine(model_root=model_dir, recognition_mode=recognition_mode),
+            fallback=fallback,
         )
-        PublicBundleRunner(pipeline).run(manifest, assets, assets_dir, output)
+        pack = _document_pack(document_pack)
+        PublicBundleRunner(pipeline, document_pack=pack).run(manifest, assets, assets_dir, output)
     except (BundleError, IngestionError, OcrDependencyError, PdfInspectionError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(str(output))
@@ -99,6 +109,27 @@ def process(
         typer.echo(document.model_dump_json(indent=2))
 
 
+@app.command("extract-invoice")
+def extract_invoice_command(
+    source: Path,
+    output: Path | None = typer.Option(None, "--output", "-o"),
+    model_dir: Path | None = typer.Option(None, "--model-dir", exists=True, file_okay=False),
+) -> None:
+    """Process a document and extract Algerian invoice fields with evidence."""
+
+    try:
+        document = _pipeline(model_dir=model_dir).process_path(source)
+        extraction = InvoiceDzPack().extract(document)
+        document = document.model_copy(update={"extractions": [extraction]})
+    except (IngestionError, OcrDependencyError, PdfInspectionError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if output:
+        export_document(document, output)
+        typer.echo(str(output))
+    else:
+        typer.echo(document.model_dump_json(indent=2))
+
+
 @app.command("export-prediction")
 def export_prediction_command(
     source: Path,
@@ -134,3 +165,11 @@ def _pipeline(*, model_dir: Path | None = None) -> HybridPipeline:
     if model_dir is None:
         return HybridPipeline()
     return HybridPipeline(ocr=PaddleOcrEngine(model_root=model_dir))
+
+
+def _document_pack(name: str | None):
+    if name is None:
+        return None
+    if name == "invoice-dz":
+        return InvoiceDzPack()
+    raise ValueError(f"unsupported document pack: {name}")

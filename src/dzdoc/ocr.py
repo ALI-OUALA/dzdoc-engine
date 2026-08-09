@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from math import hypot, isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .contracts import AdapterMetadata
 from .model_registry import ASSET_BY_NAME, OCR_ASSETS
@@ -49,6 +49,10 @@ class Recognition:
     confidence: float
     adapter: str
     expected_script: str
+    kind: Literal["ocr", "vlm"] = "ocr"
+    model: str | None = None
+    model_revision: str | None = None
+    details: dict[str, str | int | float | bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,15 +295,15 @@ def _predict(model: Any, crop: Any, adapter: str, script: str) -> Recognition:
 def _crop(image: Any, region: DetectedRegion) -> Any:
     """Perspective-normalize one quadrilateral without a second detection pass."""
 
+    if len(region.polygon) != 4:
+        box = region.bbox
+        return image[int(box.y) : int(box.y + box.height), int(box.x) : int(box.x + box.width)]
     try:
         import cv2  # pyright: ignore[reportMissingImports] -- optional OCR extra
         import numpy as np
     except ImportError as exc:
         raise OcrDependencyError("OpenCV and NumPy are required by dzdoc[ocr-paddle]") from exc
     points = np.asarray(region.polygon, dtype="float32")
-    if len(points) != 4:
-        box = region.bbox
-        return image[int(box.y) : int(box.y + box.height), int(box.x) : int(box.x + box.width)]
     width = max(hypot(*(points[1] - points[0])), hypot(*(points[2] - points[3])))
     height = max(hypot(*(points[3] - points[0])), hypot(*(points[2] - points[1])))
     target = np.asarray(
