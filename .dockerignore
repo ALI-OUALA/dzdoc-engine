@@ -1,0 +1,10 @@
+.git
+.venv
+.data
+.models
+.tmp
+apps/web/node_modules
+apps/web/node_modules-broken
+apps/web/dist
+__pycache__
+tests

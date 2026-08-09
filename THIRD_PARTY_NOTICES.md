@@ -10,6 +10,11 @@
 | pypdfium2 / PDFium | optional native PDF inspection and rendering | pypdfium2 Apache-2.0/BSD-3-Clause; bundled PDFium and third-party notices also apply |
 | Pillow | image decoding and tests | HPND; OCR/dev extras |
 | Pyright | static type checking | MIT; development dependency |
+| FastAPI / Starlette / Uvicorn | optional HTTP service | MIT / BSD-3-Clause; service extra |
+| SQLAlchemy / psycopg | metadata, queue, PostgreSQL adapter | MIT / LGPL-3.0 with linking exception; service extra |
+| boto3 | optional S3-compatible object store | Apache-2.0; s3 extra |
+| React / Vite / Lucide | review web application and icons | MIT / MIT / ISC |
+| PostgreSQL / nginx | operator-supplied deployment services | PostgreSQL / BSD-2-Clause; not linked into project code |
 
 No model weights, benchmark documents, or copied document content are included.
 

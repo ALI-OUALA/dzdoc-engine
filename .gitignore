@@ -10,6 +10,9 @@ build/
 *.egg-info/
 .mypy_cache/
 .pyright/
+node_modules/
+node_modules-broken/
+*.tsbuildinfo
 *.pdf
 *.png
 *.jpg

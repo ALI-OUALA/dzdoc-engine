@@ -1,0 +1,46 @@
+services:
+  api:
+    build: .
+    environment: &dzdoc-env
+      DZDOC_ENVIRONMENT: production
+      DZDOC_DATABASE_URL: postgresql+psycopg://dzdoc:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres/dzdoc
+      DZDOC_STORAGE_BACKEND: local
+      DZDOC_OBJECT_ROOT: /data/objects
+      DZDOC_BOOTSTRAP_TOKEN: ${DZDOC_BOOTSTRAP_TOKEN:?set DZDOC_BOOTSTRAP_TOKEN}
+      DZDOC_ALLOW_ORIGINS: ${DZDOC_ALLOW_ORIGINS:-http://localhost:8080}
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["object-data:/data/objects"]
+    restart: unless-stopped
+  worker:
+    build: .
+    entrypoint: ["dzdoc-worker"]
+    command: ["--capability", "cpu"]
+    environment: *dzdoc-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes:
+      - "./.models:/app/.models:ro"
+      - "object-data:/data/objects"
+    restart: unless-stopped
+  web:
+    build: ./apps/web
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: dzdoc
+      POSTGRES_USER: dzdoc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dzdoc"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  object-data:

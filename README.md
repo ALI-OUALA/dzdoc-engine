@@ -19,6 +19,11 @@ Current deterministic foundation provides:
 - an Algerian invoice pack for supplier/buyer, invoice number/date, NIF, NIS, RC,
   line items, HT, TVA, TTC, currency, source boxes, confidence, and arithmetic checks;
 - JSON export and a neutral DZ-Bench `Predictions` artifact.
+- a versioned FastAPI surface, tenant-scoped API keys, idempotent asynchronous
+  jobs, DB leases, CPU/GPU worker capabilities, content-addressed local/S3
+  storage, signed webhooks, corrections, usage, retention, and deletion;
+- Python and TypeScript SDK foundations, OCI images, a one-server Docker Compose
+  profile, and a responsive Arabic/French review workspace.
 
 No model weight is bundled or downloaded at install/test time.
 Native-text PDFs can be inspected and processed without OCR assets. Raster pages
@@ -53,6 +58,22 @@ uv run ruff format --check .
 uv run pyright
 ```
 
+Run the local service profile:
+
+```powershell
+uv sync --extra service --extra pdf --extra dev
+$env:DZDOC_BOOTSTRAP_TOKEN = "replace-with-a-random-value"
+uv run dzdoc-api
+uv run dzdoc-worker --once
+uv run dzdoc-bootstrap
+```
+
+For the private one-server profile, copy `.env.example` to `.env`, replace every
+secret, then run `docker compose up --build`. The Compose topology is API +
+CPU worker + PostgreSQL + private shared object volume + review web app. Add
+workers using `docker compose up --scale worker=3`; the OCR core does not depend
+on Docker.
+
 For a public DZ-Bench raster bundle, keep the manifest and ground-truth-free asset index
 at the published contract version and run:
 
@@ -75,10 +96,12 @@ by `dz-bench`; this package does not import `dz_bench`.
 
 Implemented and tested: canonical models, byte/page/pixel ingestion limits, native
 text quality routing, selective rendering, real PP-OCRv5 detect-once OCR, specialist
-routing/fusion, JSON serialization, CLI flow, and contract-shaped export.
+routing/fusion, JSON serialization, CLI flow, contract-shaped export, service/API
+authorization, idempotent queue processing, retention/deletion, SDKs, and UI build.
 
 Measured checkpoints and model rationale are in
 `docs/decisions/0002-deterministic-ocr-baseline.md` and
 `docs/benchmarks/invoice-dz-2026-08-09.md`. They are deliberately not broad accuracy
-claims. Table reconstruction, diagram/equation semantics, handwriting, API/workers,
-and calibrated confidence remain incomplete; layout classification is heuristic.
+claims. Broad real-document accuracy, handwriting, semantic diagram/equation
+understanding, calibrated confidence, automatic schema migrations, and a live
+hosted deployment remain incomplete; layout classification is heuristic.

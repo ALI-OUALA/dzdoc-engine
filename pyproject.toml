@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "httpx>=0.28,<1",
   "numpy>=2,<3",
   "pillow>=10,<13",
   "psutil>=7,<8",
@@ -23,6 +24,14 @@ dev = [
   "pytest>=8,<9",
   "ruff>=0.6,<1",
 ]
+service = [
+  "fastapi>=0.116,<1",
+  "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+  "sqlalchemy>=2.0.40,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+s3 = ["boto3>=1.40,<2"]
 pdf = ["pypdfium2>=5.5,<6"]
 ocr-paddle = [
     "numpy>=2,<3",
@@ -41,9 +50,12 @@ vlm-paddle = [
 
 [project.scripts]
 dzdoc = "dzdoc.cli:app"
+dzdoc-api = "dzdoc_service.cli:api_main"
+dzdoc-worker = "dzdoc_service.cli:worker_main"
+dzdoc-bootstrap = "dzdoc_service.cli:bootstrap_main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dzdoc"]
+packages = ["src/dzdoc", "src/dzdoc_service"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
