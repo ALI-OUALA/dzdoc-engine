@@ -1,7 +1,7 @@
 services:
   - type: web
     runtime: python
-    name: dzdoc-api-demo
+    name: dzdoc-api
     plan: free
     region: frankfurt
     buildCommand: pip install uv && uv sync --frozen --no-dev --extra service --extra pdf
@@ -33,7 +33,7 @@ services:
     pullRequestPreviewsEnabled: true
     envVars:
       - key: VITE_DZDOC_API_URL
-        value: https://dzdoc-api-demo.onrender.com
+        value: https://dzdoc-api-1yet.onrender.com
     headers:
       - path: /*
         name: X-Content-Type-Options
