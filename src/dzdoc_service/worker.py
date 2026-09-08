@@ -9,7 +9,7 @@ import urllib.request
 from datetime import timedelta
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from dzdoc.document_packs.invoice_dz import InvoiceDzPack
 from dzdoc.models import Document
@@ -129,6 +129,7 @@ class Worker:
             job.finished_at = utcnow()
             if document:
                 document.status = "failed"
+                self._queue_webhooks(session, job, document, status="failed")
         else:
             job.status = "queued"
             job.available_at = utcnow() + timedelta(seconds=min(300, 2**job.attempt_count))
@@ -136,7 +137,9 @@ class Worker:
                 document.status = "queued"
         session.commit()
 
-    def _queue_webhooks(self, session, job: Job, document: StoredDocument) -> None:
+    def _queue_webhooks(
+        self, session, job: Job, document: StoredDocument, status: str = "succeeded"
+    ) -> None:
         endpoints = session.scalars(
             select(WebhookEndpoint).where(
                 WebhookEndpoint.tenant_id == job.tenant_id,
@@ -150,7 +153,7 @@ class Worker:
                 "type": "document.completed",
                 "document_id": document.id,
                 "job_id": job.id,
-                "status": "succeeded",
+                "status": status,
             }
         )
         for endpoint in endpoints:
@@ -176,19 +179,48 @@ class WebhookDispatcher:
             delivery = session.scalar(
                 select(WebhookDelivery)
                 .where(
-                    WebhookDelivery.status == "pending",
                     WebhookDelivery.available_at <= utcnow(),
+                    or_(
+                        WebhookDelivery.status == "pending",
+                        WebhookDelivery.status == "processing",
+                    ),
                 )
                 .order_by(WebhookDelivery.available_at)
                 .limit(1)
             )
             if delivery is None:
                 return None
+
+            # Claim the webhook delivery to avoid duplicate processing
+            result = session.execute(
+                update(WebhookDelivery)
+                .where(
+                    WebhookDelivery.id == delivery.id,
+                    WebhookDelivery.status == delivery.status,
+                    WebhookDelivery.attempt_count == delivery.attempt_count,
+                )
+                .values(
+                    status="processing",
+                    attempt_count=delivery.attempt_count + 1,
+                    available_at=utcnow() + timedelta(seconds=self.timeout_seconds + 5),
+                )
+            )
+            if getattr(result, "rowcount", 0) != 1:
+                return None
+            session.commit()
+
+        # Fetch the claimed delivery for processing
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery.id)
+            if delivery is None:
+                return None
+
             endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
             if endpoint is None or not endpoint.active:
                 delivery.status = "cancelled"
                 session.commit()
                 return delivery.id
+
             body = delivery.payload_json.encode()
             timestamp = int(time.time())
             request = urllib.request.Request(
@@ -202,18 +234,20 @@ class WebhookDispatcher:
                     "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
                 },
             )
+
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                     delivery.response_code = response.status
                 delivery.status = "delivered"
             except (urllib.error.URLError, TimeoutError) as exc:
-                delivery.attempt_count += 1
                 delivery.last_error = type(exc).__name__
                 if delivery.attempt_count >= 8:
                     delivery.status = "dead_letter"
                 else:
+                    delivery.status = "pending"
                     delivery.available_at = utcnow() + timedelta(
                         seconds=min(3600, 2**delivery.attempt_count * 5)
                     )
+
             session.commit()
             return delivery.id
