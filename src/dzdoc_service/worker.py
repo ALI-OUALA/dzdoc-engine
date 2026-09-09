@@ -207,6 +207,8 @@ class WebhookDispatcher:
                     delivery.response_code = response.status
                 delivery.status = "delivered"
             except (urllib.error.URLError, TimeoutError) as exc:
+                if isinstance(exc, urllib.error.HTTPError):
+                    delivery.response_code = exc.code
                 delivery.attempt_count += 1
                 delivery.last_error = type(exc).__name__
                 if delivery.attempt_count >= 8:

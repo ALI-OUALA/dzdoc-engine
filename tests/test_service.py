@@ -176,3 +176,55 @@ def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     stored = service.result(principal, job.document_id)
     assert stored is not None
     assert json.loads(stored.decode("utf-8"))["source_name"] == "فاتورة.pdf"
+
+
+def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    class MockHTTPError(urllib.error.HTTPError):
+        def __init__(self, url, code, msg, hdrs, fp):
+            super().__init__(url, code, msg, hdrs, fp)
+
+    def mock_urlopen(request, timeout=None):
+        raise MockHTTPError(request.full_url, 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    dispatcher = WebhookDispatcher(database)
+    dispatcher.run_once()
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.response_code == 400
+        assert updated.last_error == "MockHTTPError"
+        assert updated.status == "pending"  # Still retries
+        assert updated.attempt_count == 1
