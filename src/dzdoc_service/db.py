@@ -173,6 +173,37 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def claim_webhook_delivery(session: Session, now: datetime | None = None) -> WebhookDelivery | None:
+    from sqlalchemy import select, update
+
+    current = now or utcnow()
+    candidates = session.scalars(
+        select(WebhookDelivery)
+        .where(
+            WebhookDelivery.status == "pending",
+            WebhookDelivery.available_at <= current,
+        )
+        .order_by(WebhookDelivery.available_at)
+        .limit(8)
+    ).all()
+
+    for candidate in candidates:
+        result = session.execute(
+            update(WebhookDelivery)
+            .where(
+                WebhookDelivery.id == candidate.id,
+                WebhookDelivery.status == "pending",
+                WebhookDelivery.attempt_count == candidate.attempt_count,
+            )
+            .values(status="processing")
+        )
+        if getattr(result, "rowcount", 0) == 1:
+            session.commit()
+            return session.get(WebhookDelivery, candidate.id)
+        session.rollback()
+    return None
+
+
 def claim_job(
     session: Session, *, capability: str, lease_seconds: int, now: datetime | None = None
 ) -> Job | None:
