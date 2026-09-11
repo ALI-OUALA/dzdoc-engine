@@ -178,6 +178,70 @@ def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     assert json.loads(stored.decode("utf-8"))["source_name"] == "فاتورة.pdf"
 
 
+def test_claim_job_handles_optimistic_concurrency_rollback_safely(tmp_path: Path) -> None:
+    from dzdoc_service.db import Job, StoredDocument, Tenant, claim_job, new_id
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        tenant = Tenant(id=tenant_id, name="Test Tenant")
+        doc_id = new_id()
+        doc = StoredDocument(
+            id=doc_id,
+            tenant_id=tenant_id,
+            source_name="test.pdf",
+            source_object_key="test",
+            media_kind="pdf",
+            size_bytes=100,
+            sha256="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        )
+        job1 = Job(id=new_id(), tenant_id=tenant_id, document_id=doc_id, capability="cpu")
+        job2 = Job(id=new_id(), tenant_id=tenant_id, document_id=doc_id, capability="cpu")
+        session.add(tenant)
+        session.add(doc)
+        session.add(job1)
+        session.add(job2)
+        session.commit()
+        job1_id = job1.id
+        job2_id = job2.id
+
+    # To trigger the optimistic concurrency rollback without altering the internal claim_job logic,
+    # we simulate another worker picking up job1 first, updating its attempt_count.
+    # We do this directly before calling claim_job, which fetches multiple candidates.
+    # To reliably hit the rollback branch in claim_job, we mock the session.execute update
+    # to return a fake result with rowcount=0 for the first job it tries to claim.
+    from sqlalchemy.orm import Session
+
+    class FakeSession(Session):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._fake_first_update = True
+
+        def execute(self, statement, *args, **kwargs):
+            stmt_str = str(statement)
+            if "UPDATE jobs SET status" in stmt_str and getattr(self, "_fake_first_update", True):
+                self._fake_first_update = False
+
+                class FakeResult:
+                    rowcount = 0
+
+                return FakeResult()
+            return super().execute(statement, *args, **kwargs)
+
+    with FakeSession(database.engine) as fake_session:
+        # This will fetch both job1 and job2 as candidates.
+        # When attempting to update job1, it will fail (rowcount=0) and trigger session.rollback().
+        # The next iteration of the loop for job2 should succeed without throwing a
+        # DetachedInstanceError or triggering an unintended lazy-load of a detached ORM object.
+        claimed_job = claim_job(fake_session, capability="cpu", lease_seconds=60)
+
+        # It should successfully claim job2 after rolling back job1's failed update attempt
+        assert claimed_job is not None
+        assert claimed_job.id in (job1_id, job2_id)
+        assert claimed_job.status == "processing"
+
+
 def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatch) -> None:
     import urllib.error
     import urllib.request
