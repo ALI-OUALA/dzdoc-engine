@@ -1,6 +1,7 @@
-import pytest
 from datetime import timedelta
-from dzdoc_service.db import Database, Job, Tenant, StoredDocument, claim_job, utcnow, new_id
+
+from dzdoc_service.db import Database, Job, StoredDocument, Tenant, claim_job, utcnow
+
 
 def test_claim_job_stealing(tmp_path):
     db = Database(f"sqlite:///{tmp_path}/test.db")
@@ -8,15 +9,46 @@ def test_claim_job_stealing(tmp_path):
 
     with db.session() as session:
         tenant = Tenant(id="t1", name="t1")
-        doc1 = StoredDocument(id="d1", tenant_id="t1", sha256="1", source_name="1", media_kind="pdf", size_bytes=1, source_object_key="1")
-        doc2 = StoredDocument(id="d2", tenant_id="t1", sha256="2", source_name="2", media_kind="pdf", size_bytes=1, source_object_key="2")
-        job1 = Job(id="j1", tenant_id="t1", document_id="d1", capability="cpu", status="queued", attempt_count=0)
-        job2 = Job(id="j2", tenant_id="t1", document_id="d2", capability="cpu", status="queued", attempt_count=0)
+        doc1 = StoredDocument(
+            id="d1",
+            tenant_id="t1",
+            sha256="1",
+            source_name="1",
+            media_kind="pdf",
+            size_bytes=1,
+            source_object_key="1",
+        )
+        doc2 = StoredDocument(
+            id="d2",
+            tenant_id="t1",
+            sha256="2",
+            source_name="2",
+            media_kind="pdf",
+            size_bytes=1,
+            source_object_key="2",
+        )
+        job1 = Job(
+            id="j1",
+            tenant_id="t1",
+            document_id="d1",
+            capability="cpu",
+            status="queued",
+            attempt_count=0,
+        )
+        job2 = Job(
+            id="j2",
+            tenant_id="t1",
+            document_id="d2",
+            capability="cpu",
+            status="queued",
+            attempt_count=0,
+        )
         session.add_all([tenant, doc1, doc2, job1, job2])
         session.commit()
 
     with db.session() as session_b:
-        from sqlalchemy import select, and_, or_
+        from sqlalchemy import and_, or_, select
+
         current = utcnow()
 
         # Worker B gets candidates
@@ -44,8 +76,10 @@ def test_claim_job_stealing(tmp_path):
             session_a.commit()
 
         # Let's simulate the loop in claim_job for Worker B:
-        from sqlalchemy import update
         import secrets
+
+        from sqlalchemy import update
+
         claimed_b = None
         for job_id, previous_status, attempt_count, started_at in candidates_b:
             token = secrets.token_hex(24)
