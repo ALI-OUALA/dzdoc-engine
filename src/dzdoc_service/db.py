@@ -179,8 +179,8 @@ def claim_job(
     from sqlalchemy import and_, or_, select, update
 
     current = now or utcnow()
-    candidates = session.scalars(
-        select(Job)
+    candidates = session.execute(
+        select(Job.id, Job.status, Job.attempt_count, Job.started_at)
         .where(
             Job.capability == capability,
             Job.attempt_count < Job.max_attempts,
