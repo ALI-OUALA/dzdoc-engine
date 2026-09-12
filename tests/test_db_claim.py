@@ -1,6 +1,7 @@
 import pytest
-from datetime import datetime
-from dzdoc_service.db import Database, Base, Tenant, Job, new_id, claim_job
+
+from dzdoc_service.db import Base, Database, Job, Tenant, claim_job, new_id
+
 
 def test_claim_job_handles_concurrency_race():
     db = Database("sqlite://")
@@ -35,8 +36,10 @@ def test_claim_job_handles_concurrency_race():
                     with db.engine.connect() as conn:
                         conn.execute(Job.__table__.delete().where(Job.id == j2_id))
                         conn.commit()
+
                     class FakeResult:
                         rowcount = 0
+
                     return FakeResult()
             return orig_execute(stmt, *args, **kwargs)
 
@@ -46,6 +49,7 @@ def test_claim_job_handles_concurrency_race():
         job = claim_job(session, capability="cpu", lease_seconds=60)
         assert job is not None
         assert job.id == j3_id
+
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
