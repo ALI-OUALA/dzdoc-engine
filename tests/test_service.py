@@ -163,6 +163,22 @@ def test_settings_from_environment_uses_real_defaults(monkeypatch) -> None:
     assert ServiceSettings.from_env().embedded_worker is True
 
 
+def test_api_bootstrap_handles_unicode_gracefully(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    settings = ServiceSettings(
+        database_url=settings.database_url,
+        object_root=settings.object_root,
+        bootstrap_token="testé",
+    )
+    app = create_app(settings, database=database, store=store)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/bootstrap",
+            headers={"X-Bootstrap-Token": "test"},
+        )
+        assert response.status_code == 404
+
+
 def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)

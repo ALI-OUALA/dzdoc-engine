@@ -159,7 +159,7 @@ def create_app(
         x_bootstrap_token: Annotated[str | None, Header()] = None,
     ) -> dict[str, str]:
         if not config.bootstrap_token or not hmac.compare_digest(
-            x_bootstrap_token or "", config.bootstrap_token
+            (x_bootstrap_token or "").encode("utf-8"), config.bootstrap_token.encode("utf-8")
         ):
             raise HTTPException(404, "not found")
         tenant_id, token = service.bootstrap()
