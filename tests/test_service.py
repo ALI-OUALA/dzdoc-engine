@@ -211,10 +211,10 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
 
     class MockHTTPError(urllib.error.HTTPError):
         def __init__(self, url, code, msg, hdrs, fp):
-            super().__init__(url, code, msg, hdrs, fp)
+            super().__init__(url, code, msg, hdrs, fp)  # type: ignore
 
     def mock_urlopen(request, timeout=None):
-        raise MockHTTPError(request.full_url, 400, "Bad Request", {}, None)
+        raise MockHTTPError(request.full_url, 400, "Bad Request", {}, None)  # type: ignore
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
@@ -228,3 +228,87 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_claim_job_concurrent_rollback_prevents_lazy_load(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+
+    from dzdoc_service.db import Job, StoredDocument, Tenant, claim_job
+
+    # Create required rows for a job
+    with database.session() as session:
+        tenant = Tenant(id="t1", name="test")
+        doc1 = StoredDocument(
+            id="d1",
+            tenant_id="t1",
+            sha256="abc",
+            source_name="x",
+            media_kind="pdf",
+            size_bytes=100,
+            source_object_key="key",
+        )
+        doc2 = StoredDocument(
+            id="d2",
+            tenant_id="t1",
+            sha256="def",
+            source_name="y",
+            media_kind="pdf",
+            size_bytes=100,
+            source_object_key="key2",
+        )
+        session.add_all([tenant, doc1, doc2])
+        session.commit()
+
+    with database.session() as session:
+        session.add(
+            Job(id="j1", tenant_id="t1", document_id="d1", capability="cpu", attempt_count=0)
+        )
+        session.add(
+            Job(id="j2", tenant_id="t1", document_id="d2", capability="cpu", attempt_count=0)
+        )
+        session.commit()
+
+    with database.session() as session:
+        # We simulate a concurrent claim by locking the first job out
+        # Using a mock for `session.execute` causes typing issues, so we'll instead
+        # run a parallel session that actually updates the attempt_count, causing
+        # the optimistic concurrency check in claim_job to fail on the first try.
+        # However, SQLite in-memory might have locking issues with concurrent updates,
+        # but SQLAlchemy sessions on the same engine should be fine as long as we don't
+        # hold conflicting locks. Actually, the easiest way to mock optimistic failure
+        # without typing errors is to monkeypatch `session.execute` correctly or patch `update`?
+
+        # To fail the optimistic update without type errors, we just use another session to change
+        # the row before `claim_job` updates it. But we don't have a hook inside `claim_job` loop.
+        # Instead, let's use the mock, but ignore type errors or cast properly.
+        from typing import Any
+
+        from sqlalchemy.sql import Update
+
+        original_execute = session.execute
+
+        call_count = 0
+
+        def fake_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            if (
+                isinstance(statement, Update)
+                and getattr(statement, "table", None) is not None
+                and getattr(statement.table, "name", "") == "jobs"
+            ):
+                call_count += 1
+                if call_count == 1:
+                    # Simulate that the first job was already claimed
+                    class EmptyResult:
+                        rowcount = 0
+
+                    return EmptyResult()
+            return original_execute(statement, *args, **kwargs)  # type: ignore
+
+        session.execute = fake_execute  # type: ignore
+
+        claimed = claim_job(session, capability="cpu", lease_seconds=60)
+
+        assert claimed is not None
+        assert claimed.id == "j2"
+        assert claimed.status == "processing"
