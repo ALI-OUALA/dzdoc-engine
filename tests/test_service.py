@@ -233,8 +233,7 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
 def test_claim_job_concurrent_rollback_prevents_lazy_load(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
 
-    from dzdoc_service.db import Job, Tenant, StoredDocument, claim_job
-    import logging
+    from dzdoc_service.db import Job, StoredDocument, Tenant, claim_job
 
     # Create required rows for a job
     with database.session() as session:
@@ -279,13 +278,11 @@ def test_claim_job_concurrent_rollback_prevents_lazy_load(tmp_path: Path) -> Non
         # hold conflicting locks. Actually, the easiest way to mock optimistic failure
         # without typing errors is to monkeypatch `session.execute` correctly or patch `update`?
 
-        from sqlalchemy import update
-
-        # To fail the optimistic update without type errors, we just use another session to change the row
-        # right before `claim_job` updates it. But we don't have a hook inside `claim_job`'s loop.
+        # To fail the optimistic update without type errors, we just use another session to change
+        # the row before `claim_job` updates it. But we don't have a hook inside `claim_job` loop.
         # Instead, let's use the mock, but ignore type errors or cast properly.
-        import typing
         from typing import Any
+
         from sqlalchemy.sql import Update
 
         original_execute = session.execute
