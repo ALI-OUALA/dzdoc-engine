@@ -1,8 +1,5 @@
-from datetime import datetime, timedelta, UTC
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from dzdoc_service.db import Database, Job, Tenant, claim_job, new_id
 
-from dzdoc_service.db import Base, Job, claim_job, Database, new_id, Tenant
 
 def test_claim_job_rollback_prevents_lazy_load_exceptions():
     """
@@ -23,28 +20,37 @@ def test_claim_job_rollback_prevents_lazy_load_exceptions():
         session.add(Tenant(id=tenant_id, name="Test"))
         session.commit()
 
-        j1 = Job(id=new_id(), tenant_id=tenant_id, document_id="doc1", status="queued", capability="cpu")
-        j2 = Job(id=new_id(), tenant_id=tenant_id, document_id="doc2", status="queued", capability="cpu")
+        j1 = Job(
+            id=new_id(), tenant_id=tenant_id, document_id="doc1", status="queued", capability="cpu"
+        )
+        j2 = Job(
+            id=new_id(), tenant_id=tenant_id, document_id="doc2", status="queued", capability="cpu"
+        )
         session.add_all([j1, j2])
         session.commit()
 
     with database.session() as session:
         original_execute = session.execute
         call_count = 0
+
         def fake_execute(statement, *args, **kwargs):
             nonlocal call_count
-            if getattr(statement, 'is_dml', False):
+            if getattr(statement, "is_dml", False):
                 call_count += 1
                 if call_count == 1:
+
                     class FakeResult:
                         rowcount = 0
+
                     return FakeResult()
             return original_execute(statement, *args, **kwargs)
 
         session.execute = fake_execute
 
         from sqlalchemy import event
+
         select_count = 0
+
         def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
             nonlocal select_count
             if statement.strip().lower().startswith("select"):
