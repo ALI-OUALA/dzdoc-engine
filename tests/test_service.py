@@ -228,3 +228,83 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_job_claim_optimistic_concurrency_fallback(tmp_path: Path) -> None:
+
+    from sqlalchemy import update
+
+    from dzdoc_service.db import Database, Job, StoredDocument, Tenant, claim_job
+
+    database = Database(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    database.create_schema()
+
+    with database.session() as session:
+        t = Tenant(id="t1", name="Test")
+        session.add(t)
+        doc = StoredDocument(
+            id="d1",
+            tenant_id="t1",
+            sha256="abc",
+            source_name="test.pdf",
+            media_kind="pdf",
+            size_bytes=100,
+            source_object_key="key",
+        )
+        session.add(doc)
+
+        j1 = Job(
+            id="j1",
+            tenant_id="t1",
+            document_id="d1",
+            status="queued",
+            capability="cpu",
+            attempt_count=0,
+        )
+        j2 = Job(
+            id="j2",
+            tenant_id="t1",
+            document_id="d1",
+            status="queued",
+            capability="cpu",
+            attempt_count=0,
+        )
+        session.add_all([j1, j2])
+        session.commit()
+
+    with database.session() as main_session, database.session() as rival_session:
+        # Simulate claim_job but we will interrupt the internal execution of update(Job).
+        # We hook into session.execute to simulate a rival worker claiming j1 right before we do,
+        # forcing our update to fail and trigger a rollback.
+
+        original_execute = main_session.execute
+
+        def mock_execute(stmt, *args, **kwargs):
+            if hasattr(stmt, "table") and stmt.table.name == "jobs" and stmt.is_update:
+                params = stmt.compile().params
+                # If we are trying to update j1, simulate that the rival already updated it.
+                # So we just execute the rival update first!
+                if params.get("id_1") == "j1":
+                    rival_session.execute(
+                        update(Job).where(Job.id == "j1").values(status="processing")
+                    )
+                    rival_session.commit()
+
+                    # And another rival claims j2 while we rollback!
+                    rival_session.execute(
+                        update(Job).where(Job.id == "j2").values(status="processing")
+                    )
+                    rival_session.commit()
+            return original_execute(stmt, *args, **kwargs)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(main_session, "execute", side_effect=mock_execute):
+            job = claim_job(main_session, capability="cpu", lease_seconds=60)
+
+        # If the fix works, main_session reads the original tuple for j2 (status="queued"),
+        # attempts to update j2 where status="queued", but rival_session already
+        # changed it to "processing".
+        # So rowcount will be 0, and main_session will rollback again, returning None,
+        # instead of accidentally claiming j2 (because lazy load bypasses optimistic locking).
+        assert job is None
