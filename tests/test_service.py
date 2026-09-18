@@ -228,3 +228,109 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path) -> None:
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+            attempt_count=0,
+        )
+        delivery2 = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 2}),
+            attempt_count=0,
+        )
+        session.add_all([endpoint, delivery, delivery2])
+        session.commit()
+
+    dispatcher = WebhookDispatcher(database)
+
+    execute_calls = 0
+
+    # Mock urllib.request to avoid trying to actually hit the example.com webhook in the test
+    import urllib.request
+
+    class MockHTTPError(urllib.error.HTTPError):
+        def __init__(self, url, code, msg, hdrs, fp):
+            super().__init__(url, code, msg, hdrs, fp)
+
+    original_urlopen = urllib.request.urlopen
+
+    def mock_urlopen(request, timeout=None):
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    urllib.request.urlopen = mock_urlopen
+
+    # Monkey patch the session factory temporarily
+    original_sessions = database.sessions
+
+    def mock_sessions():
+        session = original_sessions()
+        orig_execute = session.execute
+
+        def mock_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 2:
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return orig_execute(*args, **kwargs)
+
+        session.execute = mock_execute
+        return session
+
+    database.sessions = mock_sessions
+
+    try:
+        res = dispatcher.run_once()
+        print("Dispatcher returned:", res)
+    finally:
+        database.sessions = original_sessions
+        urllib.request.urlopen = original_urlopen
+
+    with database.session() as session:
+        d1 = session.get(WebhookDelivery, delivery.id)
+        d2 = session.get(WebhookDelivery, delivery2.id)
+        assert d1 is not None
+        assert d2 is not None
+
+        # d1 should be skipped because of rowcount=0, d2 should be attempted
+        print("d1:", d1.attempt_count, d1.status)
+        print("d2:", d2.attempt_count, d2.status)
+        assert d1.attempt_count == 0
+        assert d2.status == "delivered"
