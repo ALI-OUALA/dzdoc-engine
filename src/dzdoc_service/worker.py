@@ -189,33 +189,58 @@ class WebhookDispatcher:
                 delivery.status = "cancelled"
                 session.commit()
                 return delivery.id
-            body = delivery.payload_json.encode()
-            timestamp = int(time.time())
-            request = urllib.request.Request(
-                endpoint.url,
-                data=body,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "DzDoc-Event-Id": delivery.event_id,
-                    "DzDoc-Timestamp": str(timestamp),
-                    "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
-                delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
-                delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
-                if delivery.attempt_count >= 8:
-                    delivery.status = "dead_letter"
-                else:
-                    delivery.available_at = utcnow() + timedelta(
-                        seconds=min(3600, 2**delivery.attempt_count * 5)
-                    )
+
+            delivery.available_at = utcnow() + timedelta(seconds=self.timeout_seconds + 5.0)
             session.commit()
-            return delivery.id
+
+            delivery_id = delivery.id
+            endpoint_url = endpoint.url
+            signing_secret = endpoint.signing_secret
+            event_id = delivery.event_id
+            body = delivery.payload_json.encode()
+
+        timestamp = int(time.time())
+        request = urllib.request.Request(
+            endpoint_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "DzDoc-Event-Id": event_id,
+                "DzDoc-Timestamp": str(timestamp),
+                "DzDoc-Signature": webhook_signature(signing_secret, timestamp, body),
+            },
+        )
+
+        response_code = None
+        last_error = None
+        is_delivered = False
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+            is_delivered = True
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                response_code = exc.code
+            last_error = type(exc).__name__
+
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery_id)
+            if delivery is not None and delivery.status == "pending":
+                if is_delivered:
+                    delivery.response_code = response_code
+                    delivery.status = "delivered"
+                else:
+                    if response_code is not None:
+                        delivery.response_code = response_code
+                    delivery.attempt_count += 1
+                    delivery.last_error = last_error
+                    if delivery.attempt_count >= 8:
+                        delivery.status = "dead_letter"
+                    else:
+                        delivery.available_at = utcnow() + timedelta(
+                            seconds=min(3600, 2**delivery.attempt_count * 5)
+                        )
+                session.commit()
+            return delivery_id
