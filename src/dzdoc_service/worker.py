@@ -196,10 +196,7 @@ class WebhookDispatcher:
 
             result = session.execute(
                 update(WebhookDelivery)
-                .where(
-                    WebhookDelivery.id == delivery_id,
-                    WebhookDelivery.status == "pending"
-                )
+                .where(WebhookDelivery.id == delivery_id, WebhookDelivery.status == "pending")
                 .values(status="processing")
             )
             if getattr(result, "rowcount", 0) != 1:
@@ -253,9 +250,7 @@ class WebhookDispatcher:
                 status = "dead_letter"
             else:
                 status = "pending"
-                available_at = utcnow() + timedelta(
-                    seconds=min(3600, 2**next_attempt_count * 5)
-                )
+                available_at = utcnow() + timedelta(seconds=min(3600, 2**next_attempt_count * 5))
 
         with self.database.session() as session:
             values = {
@@ -269,9 +264,7 @@ class WebhookDispatcher:
                 values["available_at"] = available_at
 
             session.execute(
-                update(WebhookDelivery)
-                .where(WebhookDelivery.id == delivery_id)
-                .values(**values)
+                update(WebhookDelivery).where(WebhookDelivery.id == delivery_id).values(**values)
             )
             session.commit()
 

@@ -229,6 +229,7 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
 
+
 def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path) -> None:
     from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
     from dzdoc_service.worker import WebhookDispatcher
@@ -269,8 +270,10 @@ def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path) -> None:
             nonlocal execute_calls
             execute_calls += 1
             if execute_calls == 2:
+
                 class MockResult:
                     rowcount = 0
+
                 return MockResult()
             return original_execute(*args, **kwargs)
 
@@ -282,8 +285,10 @@ def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path) -> None:
                 class Context:
                     def __enter__(self):
                         return session
+
                     def __exit__(self, *args):
                         pass
+
                 return Context()
 
         dispatcher.database = MockDB()
