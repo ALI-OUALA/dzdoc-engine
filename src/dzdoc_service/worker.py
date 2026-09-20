@@ -9,7 +9,7 @@ import urllib.request
 from datetime import timedelta
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from dzdoc.document_packs.invoice_dz import InvoiceDzPack
 from dzdoc.models import Document
@@ -173,49 +173,106 @@ class WebhookDispatcher:
 
     def run_once(self) -> str | None:
         with self.database.session() as session:
-            delivery = session.scalar(
-                select(WebhookDelivery)
+            # Select only primitive values to avoid lazy loading issues after rollback
+            delivery_record = session.execute(
+                select(
+                    WebhookDelivery.id,
+                    WebhookDelivery.endpoint_id,
+                    WebhookDelivery.payload_json,
+                    WebhookDelivery.event_id,
+                    WebhookDelivery.attempt_count,
+                )
                 .where(
                     WebhookDelivery.status == "pending",
                     WebhookDelivery.available_at <= utcnow(),
                 )
                 .order_by(WebhookDelivery.available_at)
                 .limit(1)
-            )
-            if delivery is None:
+            ).first()
+            if delivery_record is None:
                 return None
-            endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
-            if endpoint is None or not endpoint.active:
-                delivery.status = "cancelled"
-                session.commit()
-                return delivery.id
-            body = delivery.payload_json.encode()
-            timestamp = int(time.time())
-            request = urllib.request.Request(
-                endpoint.url,
-                data=body,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "DzDoc-Event-Id": delivery.event_id,
-                    "DzDoc-Timestamp": str(timestamp),
-                    "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
-                },
+
+            delivery_id, endpoint_id, payload_json, event_id, attempt_count = delivery_record
+
+            result = session.execute(
+                update(WebhookDelivery)
+                .where(
+                    WebhookDelivery.id == delivery_id,
+                    WebhookDelivery.status == "pending"
+                )
+                .values(status="processing")
             )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
-                delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
-                delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
-                if delivery.attempt_count >= 8:
-                    delivery.status = "dead_letter"
-                else:
-                    delivery.available_at = utcnow() + timedelta(
-                        seconds=min(3600, 2**delivery.attempt_count * 5)
-                    )
+            if getattr(result, "rowcount", 0) != 1:
+                session.rollback()
+                return None
             session.commit()
-            return delivery.id
+
+        # Retrieve endpoint details in a brief session
+        with self.database.session() as session:
+            endpoint = session.get(WebhookEndpoint, endpoint_id)
+            if endpoint is None or not endpoint.active:
+                session.execute(
+                    update(WebhookDelivery)
+                    .where(WebhookDelivery.id == delivery_id)
+                    .values(status="cancelled")
+                )
+                session.commit()
+                return delivery_id
+            endpoint_url = endpoint.url
+            signing_secret = endpoint.signing_secret
+
+        body = payload_json.encode()
+        timestamp = int(time.time())
+        request = urllib.request.Request(
+            endpoint_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "DzDoc-Event-Id": event_id,
+                "DzDoc-Timestamp": str(timestamp),
+                "DzDoc-Signature": webhook_signature(signing_secret, timestamp, body),
+            },
+        )
+
+        response_code = None
+        status = "delivered"
+        next_attempt_count = attempt_count
+        last_error = None
+        available_at = None
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                response_code = exc.code
+            next_attempt_count += 1
+            last_error = type(exc).__name__
+            if next_attempt_count >= 8:
+                status = "dead_letter"
+            else:
+                status = "pending"
+                available_at = utcnow() + timedelta(
+                    seconds=min(3600, 2**next_attempt_count * 5)
+                )
+
+        with self.database.session() as session:
+            values = {
+                "status": status,
+                "response_code": response_code,
+                "attempt_count": next_attempt_count,
+            }
+            if last_error:
+                values["last_error"] = last_error
+            if status == "pending":
+                values["available_at"] = available_at
+
+            session.execute(
+                update(WebhookDelivery)
+                .where(WebhookDelivery.id == delivery_id)
+                .values(**values)
+            )
+            session.commit()
+
+        return delivery_id
