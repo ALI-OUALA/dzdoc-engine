@@ -228,3 +228,71 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path) -> None:
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+
+    dispatcher = WebhookDispatcher(database)
+
+    # We patch session.execute temporarily to simulate an update rowcount of 0
+    # for the processing status transition update
+    execute_calls = 0
+    original_execute = None
+    with database.session() as session:
+        original_execute = session.execute
+
+        def mock_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 2:
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return original_execute(*args, **kwargs)
+
+        session.execute = mock_execute
+
+        # Patch the database so dispatcher uses our custom session
+        class MockDB:
+            def session(self):
+                class Context:
+                    def __enter__(self):
+                        return session
+
+                    def __exit__(self, *args):
+                        pass
+
+                return Context()
+
+        dispatcher.database = MockDB()
+        result = dispatcher.run_once()
+
+    # Since rowcount=0, it should rollback and return None
+    assert result is None
