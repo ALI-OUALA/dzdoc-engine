@@ -231,7 +231,13 @@ class WebhookDispatcher:
                     break
                 session.rollback()
 
-        if delivery_id is None or payload_json is None or event_id is None or endpoint_url is None or signing_secret is None:
+        if (
+            delivery_id is None
+            or payload_json is None
+            or event_id is None
+            or endpoint_url is None
+            or signing_secret is None
+        ):
             return None
 
         body = payload_json.encode()
