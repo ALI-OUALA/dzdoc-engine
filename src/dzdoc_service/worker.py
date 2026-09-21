@@ -180,7 +180,7 @@ class WebhookDispatcher:
         payload_json = None
         event_id = None
         attempt_count = 0
-        endpoint_active = False
+
 
         with self.database.session() as session:
             delivery = session.scalar(
@@ -221,7 +221,7 @@ class WebhookDispatcher:
             payload_json = delivery.payload_json
             event_id = delivery.event_id
             attempt_count = delivery.attempt_count
-            endpoint_active = endpoint.active
+            # endpoint_active = endpoint.active
 
             session.commit()
 

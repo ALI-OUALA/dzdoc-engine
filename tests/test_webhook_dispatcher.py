@@ -46,7 +46,7 @@ def test_webhook_dispatcher_optimistic_concurrency_no_lazy_load():
     # But since we use sessionmaker, it's easier to use a mocked urlopen
 
     calls = 0
-    in_session_during_call = False
+    # in_session_during_call = False
 
     # Check if there is an active session in the database pool...
     # The simplest way is to assert no active transactions if we wrap the urlopen
