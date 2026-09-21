@@ -181,7 +181,6 @@ class WebhookDispatcher:
         event_id = None
         attempt_count = 0
 
-
         with self.database.session() as session:
             delivery = session.scalar(
                 select(WebhookDelivery)
