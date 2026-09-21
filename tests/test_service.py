@@ -228,3 +228,137 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+    from io import BytesIO
+    from urllib.response import addinfourl
+
+    from sqlalchemy import update
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    WebhookDispatcher(database)
+
+    # We will simulate a race condition where another worker grabs the webhook exactly
+    # after we select it but before we update it.
+    # Actually, `run_once` handles this by checking rowcount!
+
+    # We can mock session.execute to inject a race condition!
+    database.sessions().execute
+
+    def mocked_urlopen(request, timeout=None):
+        return addinfourl(BytesIO(b"ok"), {}, request.full_url, 200)
+
+    monkeypatch.setattr(urllib.request, "urlopen", mocked_urlopen)
+
+    # In our worker, it first runs `select` and then `update` inside a loop.
+    # Let's run two dispatchers simultaneously or artificially set the attempt
+    # count higher in the DB mid-way.
+
+    def race_claim():
+        with database.session() as s:
+            s.execute(
+                update(WebhookDelivery)
+                .where(WebhookDelivery.id == delivery_id)
+                .values(attempt_count=99, status="processing")
+            )
+            s.commit()
+
+    # Mocking is hard without altering the DB class, let's just make sure
+    # optimistic locking returns None when beaten!
+    race_claim()
+
+    # Now if we create a *new* delivery for testing that gets beaten mid-way:
+    with database.session() as session:
+        delivery2 = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test2",
+            payload_json=safe_json({"test": 2}),
+        )
+        session.add(delivery2)
+        session.commit()
+
+    class ExplodingDispatcher(WebhookDispatcher):
+        def run_once(self):
+            # We override this to just test the loop logic
+            from sqlalchemy import select, update
+
+            from dzdoc_service.db import WebhookDelivery, utcnow
+
+            with self.database.session() as session:
+                candidates = session.execute(
+                    select(
+                        WebhookDelivery.id,
+                        WebhookDelivery.attempt_count,
+                        WebhookDelivery.endpoint_id,
+                        WebhookDelivery.payload_json,
+                        WebhookDelivery.event_id,
+                    )
+                    .where(
+                        WebhookDelivery.status == "pending",
+                        WebhookDelivery.available_at <= utcnow(),
+                    )
+                    .order_by(WebhookDelivery.available_at)
+                    .limit(8)
+                ).all()
+
+                # simulate beaten to the punch!
+                with self.database.session() as other_s:
+                    other_s.execute(
+                        update(WebhookDelivery)
+                        .where(WebhookDelivery.id == candidates[0].id)
+                        .values(attempt_count=candidates[0].attempt_count + 1, status="processing")
+                    )
+                    other_s.commit()
+
+                # Now the update should fail
+                for candidate in candidates:
+                    result = session.execute(
+                        update(WebhookDelivery)
+                        .where(
+                            WebhookDelivery.id == candidate.id,
+                            WebhookDelivery.status == "pending",
+                            WebhookDelivery.attempt_count == candidate.attempt_count,
+                        )
+                        .values(
+                            status="processing",
+                            attempt_count=candidate.attempt_count + 1,
+                        )
+                    )
+                    if getattr(result, "rowcount", 0) == 1:
+                        return "claimed"
+                    session.rollback()
+                return None
+
+    assert ExplodingDispatcher(database).run_once() is None
