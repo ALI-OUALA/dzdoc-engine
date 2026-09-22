@@ -52,7 +52,7 @@ def test_claim_job_optimistic_concurrency_no_lazy_load():
             return MockResult()
         return original_execute(*args, **kwargs)
 
-    session.execute = mock_execute
+    session.execute = mock_execute  # type: ignore
 
     claimed = claim_job(session, capability="cpu", lease_seconds=60)
 
