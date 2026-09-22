@@ -172,23 +172,52 @@ class WebhookDispatcher:
         self.timeout_seconds = timeout_seconds
 
     def run_once(self) -> str | None:
+        from sqlalchemy import update
+
         with self.database.session() as session:
-            delivery = session.scalar(
-                select(WebhookDelivery)
+            candidates = session.execute(
+                select(WebhookDelivery.id, WebhookDelivery.attempt_count)
                 .where(
                     WebhookDelivery.status == "pending",
                     WebhookDelivery.available_at <= utcnow(),
                 )
                 .order_by(WebhookDelivery.available_at)
-                .limit(1)
-            )
-            if delivery is None:
+                .limit(4)
+            ).all()
+
+            delivery_id = None
+            for candidate in candidates:
+                result = session.execute(
+                    update(WebhookDelivery)
+                    .where(
+                        WebhookDelivery.id == candidate.id,
+                        WebhookDelivery.status == "pending",
+                        WebhookDelivery.attempt_count == candidate.attempt_count,
+                    )
+                    .values(status="processing")
+                )
+                if getattr(result, "rowcount", 0) == 1:
+                    session.commit()
+                    delivery_id = candidate.id
+
+                    break
+                session.rollback()
+
+            if delivery_id is None:
                 return None
+
+        # Fetch the delivery object in a new session to avoid locking
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery_id)
+            if delivery is None:
+                return delivery_id
+
             endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
             if endpoint is None or not endpoint.active:
                 delivery.status = "cancelled"
                 session.commit()
                 return delivery.id
+
             body = delivery.payload_json.encode()
             timestamp = int(time.time())
             request = urllib.request.Request(
@@ -202,18 +231,36 @@ class WebhookDispatcher:
                     "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
                 },
             )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
+
+        response_code = None
+        last_error = None
+        delivered = False
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+            delivered = True
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                response_code = exc.code
+            last_error = type(exc).__name__
+
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery_id)
+            if delivery is None:
+                return delivery_id
+
+            if delivered:
                 delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
+                delivery.response_code = response_code
+            else:
+                delivery.response_code = response_code
                 delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
+                delivery.last_error = last_error
                 if delivery.attempt_count >= 8:
                     delivery.status = "dead_letter"
                 else:
+                    delivery.status = "pending"
                     delivery.available_at = utcnow() + timedelta(
                         seconds=min(3600, 2**delivery.attempt_count * 5)
                     )
