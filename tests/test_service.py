@@ -228,3 +228,67 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import time
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+
+    requests = []
+
+    def mock_urlopen(request, timeout=None):
+        requests.append(request)
+        time.sleep(0.5)  # simulate slow network call
+
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    dispatcher1 = WebhookDispatcher(database)
+    dispatcher2 = WebhookDispatcher(database)
+
+    t1 = threading.Thread(target=dispatcher1.run_once)
+    t2 = threading.Thread(target=dispatcher2.run_once)
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # The optimistic concurrency lock ensures we only deliver the webhook once
+    assert len(requests) == 1, f"Expected 1 delivery request, got {len(requests)}"
