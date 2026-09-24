@@ -1,11 +1,13 @@
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from dzdoc_service.db import Base, Job, StoredDocument, Tenant, claim_job
 
 
-def test_claim_job_optimistic_concurrency_no_lazy_load():
-    engine = create_engine("sqlite:///:memory:")
+def test_claim_job_optimistic_concurrency_no_lazy_load(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
 
