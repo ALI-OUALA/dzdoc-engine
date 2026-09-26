@@ -228,3 +228,90 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency_no_lazy_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+            status="pending",
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    def mock_urlopen(request, timeout=None):
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    dispatcher = WebhookDispatcher(database)
+
+    original_session = dispatcher.database.session
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def mock_session():
+        with original_session() as sess:
+            original_execute = sess.execute
+            execute_calls = 0
+
+            def mock_execute(*args, **kwargs):
+                nonlocal execute_calls
+                execute_calls += 1
+                if execute_calls == 2:
+
+                    class MockResult:
+                        rowcount = 0
+
+                    return MockResult()
+                return original_execute(*args, **kwargs)
+
+            sess.execute = mock_execute
+            yield sess
+
+    monkeypatch.setattr(dispatcher.database, "session", mock_session)
+
+    # Calling run_once should return None due to the simulated optimistic concurrency failure
+    result = dispatcher.run_once()
+    assert result is None
+
+    # The delivery should remain untouched since the transaction was rolled back
+    with original_session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.status == "pending"
+        assert updated.attempt_count == 0
