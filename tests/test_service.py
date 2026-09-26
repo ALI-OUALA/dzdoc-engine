@@ -228,3 +228,82 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency_no_lazy_load(tmp_path: Path) -> None:
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    dispatcher = WebhookDispatcher(database)
+
+    # Intercept the session execute to simulate the concurrency conflict
+    original_session_factory = database.session
+
+    def mock_session():
+        # Get a real context manager
+        ctx = original_session_factory()
+        session = ctx.__enter__()
+
+        original_execute = session.execute
+        execute_calls = 0
+
+        def mock_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 2:  # The update statement
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return original_execute(*args, **kwargs)
+
+        session.execute = mock_execute
+
+        # Keep track of exit so it cleans up properly
+        original_exit = ctx.__exit__
+
+        class MockContext:
+            def __enter__(self):
+                return session
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return original_exit(exc_type, exc_value, traceback)
+
+        return MockContext()
+
+    database.session = mock_session
+
+    result = dispatcher.run_once()
+    assert result is None
+
+    # Restore and verify it wasn't processed
+    database.session = original_session_factory
+    with database.session() as session:
+        untouched = session.get(WebhookDelivery, delivery_id)
+        assert untouched is not None
+        assert untouched.status == "pending"

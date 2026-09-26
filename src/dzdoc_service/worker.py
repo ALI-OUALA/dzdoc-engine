@@ -9,7 +9,7 @@ import urllib.request
 from datetime import timedelta
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from dzdoc.document_packs.invoice_dz import InvoiceDzPack
 from dzdoc.models import Document
@@ -173,22 +173,36 @@ class WebhookDispatcher:
 
     def run_once(self) -> str | None:
         with self.database.session() as session:
-            delivery = session.scalar(
-                select(WebhookDelivery)
+            row = session.execute(
+                select(WebhookDelivery, WebhookEndpoint)
+                .join(WebhookEndpoint, WebhookDelivery.endpoint_id == WebhookEndpoint.id)
                 .where(
                     WebhookDelivery.status == "pending",
                     WebhookDelivery.available_at <= utcnow(),
                 )
                 .order_by(WebhookDelivery.available_at)
                 .limit(1)
-            )
-            if delivery is None:
+            ).first()
+            if row is None:
                 return None
-            endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
-            if endpoint is None or not endpoint.active:
+            delivery, endpoint = row
+
+            if not endpoint.active:
                 delivery.status = "cancelled"
                 session.commit()
                 return delivery.id
+
+            result = session.execute(
+                update(WebhookDelivery)
+                .where(WebhookDelivery.id == delivery.id, WebhookDelivery.status == "pending")
+                .values(available_at=utcnow() + timedelta(seconds=60))
+            )
+
+            if getattr(result, "rowcount", 0) == 0:
+                session.rollback()
+                return None
+
+            delivery_id = delivery.id
             body = delivery.payload_json.encode()
             timestamp = int(time.time())
             request = urllib.request.Request(
@@ -202,20 +216,34 @@ class WebhookDispatcher:
                     "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
                 },
             )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
+            session.commit()
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+                error = None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            response_code = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+            error = type(exc).__name__
+
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery_id)
+            if delivery is None:
+                return None
+            if error is None:
+                delivery.response_code = response_code
                 delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
+            else:
+                if response_code is not None:
+                    delivery.response_code = response_code
                 delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
+                delivery.last_error = error
                 if delivery.attempt_count >= 8:
                     delivery.status = "dead_letter"
                 else:
+                    delivery.status = "pending"
                     delivery.available_at = utcnow() + timedelta(
                         seconds=min(3600, 2**delivery.attempt_count * 5)
                     )
             session.commit()
-            return delivery.id
+            return delivery_id
