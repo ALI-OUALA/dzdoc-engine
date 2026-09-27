@@ -220,7 +220,6 @@ def claim_job(
     return None
 
 
-
 def claim_delivery(
     session: Session, *, lease_seconds: int = 60, now: datetime | None = None
 ) -> WebhookDelivery | None:
@@ -233,7 +232,10 @@ def claim_delivery(
             WebhookDelivery.available_at <= current,
             or_(
                 WebhookDelivery.status == "pending",
-                and_(WebhookDelivery.status == "processing", WebhookDelivery.available_at <= current),
+                and_(
+                    WebhookDelivery.status == "processing",
+                    WebhookDelivery.available_at <= current,
+                ),
             ),
         )
         .order_by(WebhookDelivery.available_at)
