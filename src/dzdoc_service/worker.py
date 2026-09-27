@@ -9,7 +9,7 @@ import urllib.request
 from datetime import timedelta
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from dzdoc.document_packs.invoice_dz import InvoiceDzPack
 from dzdoc.models import Document
@@ -173,49 +173,110 @@ class WebhookDispatcher:
 
     def run_once(self) -> str | None:
         with self.database.session() as session:
-            delivery = session.scalar(
-                select(WebhookDelivery)
+            candidate = session.execute(
+                select(
+                    WebhookDelivery.id,
+                    WebhookDelivery.endpoint_id,
+                    WebhookDelivery.payload_json,
+                    WebhookDelivery.event_id,
+                    WebhookDelivery.attempt_count,
+                )
                 .where(
                     WebhookDelivery.status == "pending",
                     WebhookDelivery.available_at <= utcnow(),
                 )
                 .order_by(WebhookDelivery.available_at)
                 .limit(1)
-            )
-            if delivery is None:
+            ).first()
+            if candidate is None:
                 return None
-            endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
-            if endpoint is None or not endpoint.active:
-                delivery.status = "cancelled"
-                session.commit()
-                return delivery.id
-            body = delivery.payload_json.encode()
-            timestamp = int(time.time())
-            request = urllib.request.Request(
-                endpoint.url,
-                data=body,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "DzDoc-Event-Id": delivery.event_id,
-                    "DzDoc-Timestamp": str(timestamp),
-                    "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
-                },
+
+            delivery_id, endpoint_id, payload_json, event_id, attempt_count = candidate
+
+            # Optimistic lock to claim it for this worker by updating available_at
+            # to prevent other workers from picking it up immediately
+            next_available = utcnow() + timedelta(seconds=60)
+
+            result = session.execute(
+                update(WebhookDelivery)
+                .where(
+                    WebhookDelivery.id == delivery_id,
+                    WebhookDelivery.status == "pending",
+                    WebhookDelivery.attempt_count == attempt_count,
+                )
+                .values(
+                    attempt_count=WebhookDelivery.attempt_count + 1,
+                    available_at=next_available,
+                )
             )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
-                delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
-                delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
-                if delivery.attempt_count >= 8:
-                    delivery.status = "dead_letter"
-                else:
-                    delivery.available_at = utcnow() + timedelta(
-                        seconds=min(3600, 2**delivery.attempt_count * 5)
-                    )
+
+            if getattr(result, "rowcount", 0) == 0:
+                session.commit()
+                return None
+
+            endpoint = session.get(WebhookEndpoint, endpoint_id)
+            if endpoint is None or not endpoint.active:
+                session.execute(
+                    update(WebhookDelivery)
+                    .where(WebhookDelivery.id == delivery_id)
+                    .values(status="cancelled")
+                )
+                session.commit()
+                return delivery_id
+
+            url = endpoint.url
+            signing_secret = endpoint.signing_secret
+
+            # Commit and release the DB connection before blocking on HTTP
             session.commit()
-            return delivery.id
+
+        body = payload_json.encode()
+        timestamp = int(time.time())
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "DzDoc-Event-Id": event_id,
+                "DzDoc-Timestamp": str(timestamp),
+                "DzDoc-Signature": webhook_signature(signing_secret, timestamp, body),
+            },
+        )
+
+        response_code = None
+        last_error = None
+        status = "delivered"
+        new_available_at = next_available
+        new_attempt_count = attempt_count + 1
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                response_code = exc.code
+            last_error = type(exc).__name__
+            if new_attempt_count >= 8:
+                status = "dead_letter"
+            else:
+                status = "pending"
+                new_available_at = utcnow() + timedelta(
+                    seconds=min(3600, 2**new_attempt_count * 5)
+                )
+
+        # Update the final status using a new short-lived session
+        with self.database.session() as session:
+            session.execute(
+                update(WebhookDelivery)
+                .where(WebhookDelivery.id == delivery_id)
+                .values(
+                    response_code=response_code,
+                    status=status,
+                    last_error=last_error,
+                    available_at=new_available_at,
+                )
+            )
+            session.commit()
+
+        return delivery_id
