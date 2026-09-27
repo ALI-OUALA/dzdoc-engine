@@ -220,5 +220,46 @@ def claim_job(
     return None
 
 
+
+def claim_delivery(
+    session: Session, *, lease_seconds: int = 60, now: datetime | None = None
+) -> WebhookDelivery | None:
+    from sqlalchemy import and_, or_, select, update
+
+    current = now or utcnow()
+    candidates = session.execute(
+        select(WebhookDelivery.id, WebhookDelivery.status, WebhookDelivery.attempt_count)
+        .where(
+            WebhookDelivery.available_at <= current,
+            or_(
+                WebhookDelivery.status == "pending",
+                and_(WebhookDelivery.status == "processing", WebhookDelivery.available_at <= current),
+            ),
+        )
+        .order_by(WebhookDelivery.available_at)
+        .limit(8)
+    ).all()
+    for candidate in candidates:
+        previous_status = candidate.status
+        result = session.execute(
+            update(WebhookDelivery)
+            .where(
+                WebhookDelivery.id == candidate.id,
+                WebhookDelivery.status == previous_status,
+                WebhookDelivery.attempt_count == candidate.attempt_count,
+            )
+            .values(
+                status="processing",
+                attempt_count=candidate.attempt_count + 1,
+                available_at=current + timedelta(seconds=lease_seconds),
+            )
+        )
+        if getattr(result, "rowcount", 0) == 1:
+            session.commit()
+            return session.get(WebhookDelivery, candidate.id)
+        session.rollback()
+    return None
+
+
 def safe_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
