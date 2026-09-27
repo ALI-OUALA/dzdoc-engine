@@ -261,9 +261,7 @@ class WebhookDispatcher:
                 status = "dead_letter"
             else:
                 status = "pending"
-                new_available_at = utcnow() + timedelta(
-                    seconds=min(3600, 2**new_attempt_count * 5)
-                )
+                new_available_at = utcnow() + timedelta(seconds=min(3600, 2**new_attempt_count * 5))
 
         # Update the final status using a new short-lived session
         with self.database.session() as session:
