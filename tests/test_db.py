@@ -1,7 +1,16 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from dzdoc_service.db import Base, Job, StoredDocument, Tenant, claim_job
+from dzdoc_service.db import (
+    Base,
+    Job,
+    StoredDocument,
+    Tenant,
+    WebhookDelivery,
+    WebhookEndpoint,
+    claim_delivery,
+    claim_job,
+)
 
 
 def test_claim_job_optimistic_concurrency_no_lazy_load():
@@ -60,3 +69,67 @@ def test_claim_job_optimistic_concurrency_no_lazy_load():
     assert claimed.id == "j2"
     assert claimed.status == "processing"
     assert claimed.lease_token is not None
+
+
+def test_claim_delivery_optimistic_concurrency_no_lazy_load():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    session = Session()
+    t = Tenant(id="t1", name="test")
+    e = WebhookEndpoint(
+        id="e1",
+        tenant_id="t1",
+        url="http://example.com",
+        secret_hash="x",
+        signing_secret="x",
+    )
+    session.add(t)
+    session.add(e)
+
+    # We create two deliveries to claim
+    d1 = WebhookDelivery(
+        id="d1",
+        tenant_id="t1",
+        endpoint_id="e1",
+        event_id="ev1",
+        event_type="t",
+        payload_json="{}",
+        status="pending",
+    )
+    d2 = WebhookDelivery(
+        id="d2",
+        tenant_id="t1",
+        endpoint_id="e1",
+        event_id="ev2",
+        event_type="t",
+        payload_json="{}",
+        status="pending",
+    )
+    session.add_all([d1, d2])
+    session.commit()
+
+    original_execute = session.execute
+
+    execute_calls = 0
+
+    def mock_execute(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        if execute_calls == 2:
+
+            class MockResult:
+                rowcount = 0
+
+            return MockResult()
+        return original_execute(*args, **kwargs)
+
+    session.execute = mock_execute
+
+    claimed = claim_delivery(session, lease_seconds=60)
+
+    assert claimed is not None
+    assert claimed.id == "d2"
+    assert claimed.status == "processing"
+    assert claimed.attempt_count == 1

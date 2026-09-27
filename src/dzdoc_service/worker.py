@@ -23,6 +23,7 @@ from .db import (
     UsageRecord,
     WebhookDelivery,
     WebhookEndpoint,
+    claim_delivery,
     claim_job,
     new_id,
     safe_json,
@@ -173,15 +174,7 @@ class WebhookDispatcher:
 
     def run_once(self) -> str | None:
         with self.database.session() as session:
-            delivery = session.scalar(
-                select(WebhookDelivery)
-                .where(
-                    WebhookDelivery.status == "pending",
-                    WebhookDelivery.available_at <= utcnow(),
-                )
-                .order_by(WebhookDelivery.available_at)
-                .limit(1)
-            )
+            delivery = claim_delivery(session, lease_seconds=int(self.timeout_seconds) + 10)
             if delivery is None:
                 return None
             endpoint = session.get(WebhookEndpoint, delivery.endpoint_id)
@@ -191,31 +184,48 @@ class WebhookDispatcher:
                 return delivery.id
             body = delivery.payload_json.encode()
             timestamp = int(time.time())
-            request = urllib.request.Request(
-                endpoint.url,
-                data=body,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "DzDoc-Event-Id": delivery.event_id,
-                    "DzDoc-Timestamp": str(timestamp),
-                    "DzDoc-Signature": webhook_signature(endpoint.signing_secret, timestamp, body),
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    delivery.response_code = response.status
-                delivery.status = "delivered"
-            except (urllib.error.URLError, TimeoutError) as exc:
-                if isinstance(exc, urllib.error.HTTPError):
-                    delivery.response_code = exc.code
-                delivery.attempt_count += 1
-                delivery.last_error = type(exc).__name__
-                if delivery.attempt_count >= 8:
-                    delivery.status = "dead_letter"
-                else:
+            url = endpoint.url
+            signing_secret = endpoint.signing_secret
+            event_id = delivery.event_id
+            delivery_id = delivery.id
+            attempt_count = delivery.attempt_count
+
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "DzDoc-Event-Id": event_id,
+                "DzDoc-Timestamp": str(timestamp),
+                "DzDoc-Signature": webhook_signature(signing_secret, timestamp, body),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_code = response.status
+            status = "delivered"
+            last_error = None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                response_code = exc.code
+            else:
+                response_code = None
+            last_error = type(exc).__name__
+            if attempt_count >= 8:
+                status = "dead_letter"
+            else:
+                status = "pending"
+
+        with self.database.session() as session:
+            delivery = session.get(WebhookDelivery, delivery_id)
+            if delivery and delivery.status == "processing":
+                delivery.response_code = response_code
+                delivery.last_error = last_error
+                delivery.status = status
+                if status == "pending":
                     delivery.available_at = utcnow() + timedelta(
-                        seconds=min(3600, 2**delivery.attempt_count * 5)
+                        seconds=min(3600, 2**attempt_count * 5)
                     )
-            session.commit()
-            return delivery.id
+                session.commit()
+            return delivery_id
