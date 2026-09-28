@@ -228,3 +228,102 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        d1 = WebhookDelivery(
+            id="wd1",
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+            status="pending",
+        )
+        d2 = WebhookDelivery(
+            id="wd2",
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 2}),
+            status="pending",
+        )
+        session.add(endpoint)
+        session.add_all([d1, d2])
+        session.commit()
+
+    class MockHTTPError(urllib.error.HTTPError):
+        def __init__(self, url, code, msg, hdrs, fp):
+            super().__init__(url, code, msg, hdrs, fp)
+
+    def mock_urlopen(request, timeout=None):
+        raise MockHTTPError(request.full_url, 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    # We will simulate the optimistic concurrency conflict on the first claim
+    dispatcher = WebhookDispatcher(database)
+
+    with database.session() as session:
+        original_execute = session.execute
+
+        execute_calls = 0
+
+        def mock_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 2:
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return original_execute(*args, **kwargs)
+
+        session.execute = mock_execute
+
+        # Monkeypatch database.session to return our session on the first call only
+        original_session = database.session
+
+        session_calls = 0
+        from contextlib import contextmanager
+
+        @contextmanager
+        def mock_db_session():
+            nonlocal session_calls
+            session_calls += 1
+            if session_calls == 1:
+                yield session
+            else:
+                with original_session() as s:
+                    yield s
+
+        monkeypatch.setattr(database, "session", mock_db_session)
+
+        claimed_id = dispatcher.run_once()
+
+    assert claimed_id == "wd2"
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, "wd2")
+        assert updated is not None
+        assert updated.attempt_count == 1
+        assert updated.status == "pending"
