@@ -178,6 +178,81 @@ def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     assert json.loads(stored.decode("utf-8"))["source_name"] == "فاتورة.pdf"
 
 
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    # We will simulate a concurrent dispatcher claiming the delivery
+    # right after the first one selects it.
+    dispatcher = WebhookDispatcher(database)
+
+    # To do this, we intercept session.execute in run_once
+    class SessionProxy:
+        def __init__(self, real_session):
+            self._real_session = real_session
+            self.execute_calls = 0
+
+        def execute(self, *args, **kwargs):
+            self.execute_calls += 1
+            if self.execute_calls == 2:  # Second call is the optimistic update
+                # Simulate concurrent worker claiming it first
+                with database.session() as concurrent_session:
+                    concurrent_delivery = concurrent_session.get(WebhookDelivery, delivery_id)
+                    concurrent_delivery.status = "processing"
+                    concurrent_session.commit()
+                # Then execute the original update
+                # It should return rowcount=0
+                return self._real_session.execute(*args, **kwargs)
+            return self._real_session.execute(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real_session, name)
+
+    original_session_manager = database.session
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def mock_session():
+        with original_session_manager() as real_session:
+            yield SessionProxy(real_session)
+
+    monkeypatch.setattr(database, "session", mock_session)
+
+    assert dispatcher.run_once() is None
+
+    # Verify that the webhook delivery was indeed marked as processing by the concurrent session
+    # and not processed by the main dispatcher
+    with original_session_manager() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.status == "processing"
+
+
 def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatch) -> None:
     import urllib.error
     import urllib.request
