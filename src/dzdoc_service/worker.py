@@ -267,7 +267,7 @@ class WebhookDispatcher:
                     delivery.response_code = response_code
                     delivery.last_error = error_name
                     delivery.available_at = utcnow() + timedelta(
-                        seconds=min(3600, 2**(attempt_count - 1) * 5)
+                        seconds=min(3600, 2 ** (attempt_count - 1) * 5)
                     )
                 session.commit()
 
