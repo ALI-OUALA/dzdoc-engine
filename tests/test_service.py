@@ -228,3 +228,78 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import time
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    # Mock urlopen to pause slightly so we can simulate a race condition
+    # while the HTTP request is happening.
+    def mock_urlopen(request, timeout=None):
+        time.sleep(0.1)
+
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    d1 = WebhookDispatcher(database)
+    d2 = WebhookDispatcher(database)
+
+    results = []
+
+    def run_d(d):
+        results.append(d.run_once())
+
+    t1 = threading.Thread(target=run_d, args=(d1,))
+    t2 = threading.Thread(target=run_d, args=(d2,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # One worker should have claimed and processed it, the other should return None.
+    assert results.count(delivery_id) == 1
+    assert results.count(None) == 1
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.status == "delivered"
