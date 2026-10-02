@@ -178,6 +178,77 @@ def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     assert json.loads(stored.decode("utf-8"))["source_name"] == "فاتورة.pdf"
 
 
+def test_webhook_dispatcher_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import time
+    from unittest.mock import patch
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    call_count = 0
+
+    def mock_urlopen(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        time.sleep(0.5)
+
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        return MockResponse()
+
+    def worker_run():
+        dispatcher = WebhookDispatcher(database)
+        dispatcher.run_once()
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        t1 = threading.Thread(target=worker_run)
+        t2 = threading.Thread(target=worker_run)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert call_count == 1
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.status == "delivered"
+        assert updated.response_code == 200
+
+
 def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatch) -> None:
     import urllib.error
     import urllib.request
