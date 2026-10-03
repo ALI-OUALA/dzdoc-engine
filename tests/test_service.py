@@ -228,3 +228,79 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import urllib.request
+    from unittest.mock import Mock
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": True}),
+        )
+        session.add_all([endpoint, delivery])
+        session.commit()
+
+    class MockResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    mock_req = Mock(return_value=MockResponse())
+    monkeypatch.setattr(urllib.request, "urlopen", mock_req)
+
+    dispatcher = WebhookDispatcher(database, timeout_seconds=1.0)
+
+    with database.session() as mock_db_session:
+        original_execute = mock_db_session.execute
+
+        execute_calls = 0
+
+        def mock_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            if execute_calls == 2:
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return original_execute(*args, **kwargs)
+
+        mock_db_session.execute = mock_execute
+
+        class MockSessionMaker:
+            def __enter__(self):
+                return mock_db_session
+
+            def __exit__(self, *args):
+                pass
+
+        monkeypatch.setattr(database, "session", MockSessionMaker)
+
+        dispatched_id = dispatcher.run_once()
+
+        assert dispatched_id is None
+        assert mock_req.call_count == 0
