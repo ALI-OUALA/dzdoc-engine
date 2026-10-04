@@ -228,3 +228,81 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    # We must use physical DB path here, already correctly setup by _runtime
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    call_count = 0
+    call_lock = threading.Lock()
+
+    def mock_urlopen(request, timeout=None):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+
+        class MockResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    from dzdoc_service.db import Database
+
+    def run_worker():
+        # Each thread gets its own Database instance configured identically to avoid sharing
+        # same SQLAlchemy engine session/pool unsafely for SQLite
+        worker_db = Database(settings.database_url)
+        dispatcher = WebhookDispatcher(worker_db)
+        dispatcher.run_once()
+
+    workers = 5
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for _ in range(workers):
+            executor.submit(run_worker)
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.status == "delivered"
+        assert updated.attempt_count == 1
+
+    assert call_count == 1
