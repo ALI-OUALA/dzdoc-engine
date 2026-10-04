@@ -228,3 +228,134 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_optimistic_concurrency(tmp_path: Path, monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+            status="pending",
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    # Mock urlopen to simulate a successful request
+    class MockResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def mock_urlopen(request, timeout=None):
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    # We will simulate exactly the situation by replacing the session.execute temporarily
+    original_execute = None
+    with database.session() as session:
+        original_execute = session.execute
+
+    execute_calls = 0
+
+    def mock_execute(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        # The first call is the select statement
+        if execute_calls == 2:
+            # Second call is the update statement. We mock rowcount=0 to trigger rollback
+            class MockResult:
+                rowcount = 0
+
+            return MockResult()
+        return original_execute(*args, **kwargs)
+
+    # Note: we need to patch the session that WebhookDispatcher uses
+    # But WebhookDispatcher creates its own sessions via database.session()
+    # So we can patch database.sessions temporarily
+    original_sessions = database.sessions
+
+    class MockSessionWrapper:
+        def __init__(self):
+            self.sess = original_sessions()
+            self.execute_calls = 0
+            self.original_execute = self.sess.execute
+
+        def execute(self, *args, **kwargs):
+            self.execute_calls += 1
+            if self.execute_calls == 2:
+
+                class MockResult:
+                    rowcount = 0
+
+                return MockResult()
+            return self.original_execute(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.sess, name)
+
+    class MockSessionFactory:
+        def __call__(self):
+            return MockSessionWrapper()
+
+    # Create another delivery to test the concurrency
+    with database.session() as session:
+        delivery2 = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 2}),
+            status="pending",
+        )
+        session.add(delivery2)
+        session.commit()
+        delivery2_id = delivery2.id
+
+    dispatcher = WebhookDispatcher(database)
+
+    database.sessions = MockSessionFactory()
+
+    # Run once. Because rowcount is 0 on the first update (delivery1), it should rollback
+    # and then try the next candidate (delivery2) and succeed.
+    claimed_id = dispatcher.run_once()
+
+    database.sessions = original_sessions
+
+    assert claimed_id == delivery2_id
+
+    with database.session() as session:
+        # delivery1 should still be pending
+        d1 = session.get(WebhookDelivery, delivery_id)
+        assert d1.status == "pending"
+
+        # delivery2 should be delivered
+        d2 = session.get(WebhookDelivery, delivery2_id)
+        assert d2.status == "delivered"
