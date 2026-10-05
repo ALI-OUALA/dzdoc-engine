@@ -173,6 +173,7 @@ class WebhookDispatcher:
 
     def run_once(self) -> str | None:
         from sqlalchemy import update
+
         with self.database.session() as session:
             candidates = session.execute(
                 select(WebhookDelivery.id, WebhookDelivery.attempt_count)
