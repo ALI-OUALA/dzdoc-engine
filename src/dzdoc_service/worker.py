@@ -241,7 +241,7 @@ class WebhookDispatcher:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 response_code = response.status
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             if isinstance(exc, urllib.error.HTTPError):
                 response_code = exc.code
             last_error = type(exc).__name__
