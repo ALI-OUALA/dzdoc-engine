@@ -228,3 +228,49 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_webhook_dispatcher_handles_connection_error(tmp_path: Path, monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from dzdoc_service.db import WebhookDelivery, WebhookEndpoint, new_id, safe_json
+    from dzdoc_service.worker import WebhookDispatcher
+
+    settings, database, store = _runtime(tmp_path)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        delivery = WebhookDelivery(
+            id=new_id(),
+            tenant_id=tenant_id,
+            endpoint_id=endpoint.id,
+            event_id=new_id(),
+            event_type="test",
+            payload_json=safe_json({"test": 1}),
+        )
+        session.add(endpoint)
+        session.add(delivery)
+        session.commit()
+        delivery_id = delivery.id
+
+    def mock_urlopen(*args, **kwargs):
+        raise ConnectionError("Connection reset by peer")
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    dispatcher = WebhookDispatcher(database)
+    dispatcher.run_once()
+
+    with database.session() as session:
+        updated = session.get(WebhookDelivery, delivery_id)
+        assert updated is not None
+        assert updated.last_error == "ConnectionError"
+        assert updated.status == "pending"
