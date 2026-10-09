@@ -228,3 +228,103 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_purge_expired_deletes_from_store(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, Tenant, new_id, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant_id = new_id()
+    doc_id_1 = new_id()
+    doc_id_2 = new_id()
+
+    source_key_1 = store.put(b"doc1_source")
+    result_key_1 = store.put(b"doc1_result")
+    source_key_2 = store.put(b"doc2_source")
+
+    now = utcnow()
+    with database.session() as session:
+        session.add(Tenant(id=tenant_id, name="test"))
+        session.add(
+            StoredDocument(
+                id=doc_id_1,
+                tenant_id=tenant_id,
+                sha256="abc",
+                source_name="doc1",
+                media_kind="pdf",
+                size_bytes=11,
+                source_object_key=source_key_1,
+                result_object_key=result_key_1,
+                delete_after=now - timedelta(days=1),
+            )
+        )
+        session.add(
+            StoredDocument(
+                id=doc_id_2,
+                tenant_id=tenant_id,
+                sha256="def",
+                source_name="doc2",
+                media_kind="pdf",
+                size_bytes=11,
+                source_object_key=source_key_2,
+                delete_after=now + timedelta(days=1),
+            )
+        )
+        session.commit()
+
+    assert store.exists(source_key_1)
+    assert store.exists(result_key_1)
+    assert store.exists(source_key_2)
+
+    count = service.purge_expired(now=now)
+    assert count == 1
+
+    # Verify that the keys for doc1 were actually deleted from the object store
+    assert not store.exists(source_key_1)
+    assert not store.exists(result_key_1)
+    # Ensure doc2 was not deleted
+    assert store.exists(source_key_2)
+
+
+def test_delete_document_deletes_from_store(tmp_path: Path) -> None:
+    from dzdoc_service.db import StoredDocument, Tenant, new_id
+    from dzdoc_service.service import Principal
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant_id = new_id()
+    doc_id = new_id()
+    principal = Principal(tenant_id, "key1", frozenset(["documents:delete"]))
+
+    source_key = store.put(b"source")
+    result_key = store.put(b"result")
+
+    with database.session() as session:
+        session.add(Tenant(id=tenant_id, name="test"))
+        session.add(
+            StoredDocument(
+                id=doc_id,
+                tenant_id=tenant_id,
+                sha256="abc",
+                source_name="doc",
+                media_kind="pdf",
+                size_bytes=11,
+                source_object_key=source_key,
+                result_object_key=result_key,
+            )
+        )
+        session.commit()
+
+    assert store.exists(source_key)
+    assert store.exists(result_key)
+
+    assert service.delete_document(principal, doc_id) is True
+
+    # Verify that the keys were actually deleted from the object store
+    assert not store.exists(source_key)
+    assert not store.exists(result_key)
