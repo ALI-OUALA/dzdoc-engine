@@ -228,3 +228,41 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_purge_expired_removes_old_documents(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Store a document and force it to be expired
+    data = b"%PDF-1.7\ntest document"
+    document, _job, _created = service.submit(
+        principal, data, filename="test.pdf", idempotency_key=None
+    )
+
+    with database.session() as session:
+        doc = session.get(StoredDocument, document.id)
+        assert doc is not None
+        doc.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    assert store.exists(document.source_object_key) is True
+
+    count = service.purge_expired()
+    assert count == 1
+
+    assert store.exists(document.source_object_key) is False
+
+    with database.session() as session:
+        doc = session.get(StoredDocument, document.id)
+        assert doc is not None
+        assert doc.status == "deleted"
+        assert doc.deleted_at is not None
