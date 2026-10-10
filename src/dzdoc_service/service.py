@@ -143,8 +143,8 @@ class DocumentService:
             document_input = self.ingestor.from_bytes(data, name=filename)
         except IngestionError as exc:
             raise ServiceError(str(exc)) from exc
-        with self.database.session() as session:
-            if idempotency_key:
+        if idempotency_key:
+            with self.database.session() as session:
                 existing = session.scalar(
                     select(Job).where(
                         Job.tenant_id == principal.tenant_id,
@@ -155,7 +155,10 @@ class DocumentService:
                     document = session.get(StoredDocument, existing.document_id)
                     assert document is not None
                     return document, existing, False
-            object_key = self.store.put(document_input.data)
+
+        object_key = self.store.put(document_input.data)
+
+        with self.database.session() as session:
             tenant = session.get(Tenant, principal.tenant_id)
             assert tenant is not None
             document = StoredDocument(
@@ -273,41 +276,65 @@ class DocumentService:
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
         with self.database.session() as session:
-            document = session.scalar(
-                select(StoredDocument).where(
+            document = session.execute(
+                select(StoredDocument.source_object_key, StoredDocument.result_object_key).where(
                     StoredDocument.id == document_id,
                     StoredDocument.tenant_id == principal.tenant_id,
                 )
-            )
+            ).first()
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
-            document.deleted_at = utcnow()
-            document.status = "deleted"
-            session.commit()
+            source_key, result_key = document
+
+        self.store.delete(source_key)
+        if result_key:
+            self.store.delete(result_key)
+
+        with self.database.session() as session:
+            doc = session.get(StoredDocument, document_id)
+            if doc:
+                doc.deleted_at = utcnow()
+                doc.status = "deleted"
+                session.commit()
             return True
 
     def purge_expired(self, *, now=None) -> int:
         current = now or utcnow()
-        count = 0
+
         with self.database.session() as session:
-            documents = session.scalars(
-                select(StoredDocument).where(
+            records = session.execute(
+                select(
+                    StoredDocument.id,
+                    StoredDocument.source_object_key,
+                    StoredDocument.result_object_key,
+                ).where(
                     StoredDocument.deleted_at.is_(None),
                     StoredDocument.delete_after.is_not(None),
                     StoredDocument.delete_after <= current,
                 )
             ).all()
+
+        count = 0
+        deleted_ids = []
+        for doc_id, source_key, result_key in records:
+            self.store.delete(source_key)
+            if result_key:
+                self.store.delete(result_key)
+            deleted_ids.append(doc_id)
+            count += 1
+
+        if not deleted_ids:
+            return 0
+
+        with self.database.session() as session:
+            documents = session.scalars(
+                select(StoredDocument).where(StoredDocument.id.in_(deleted_ids))
+            ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
-                count += 1
             session.commit()
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
