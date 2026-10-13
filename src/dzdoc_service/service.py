@@ -143,6 +143,7 @@ class DocumentService:
             document_input = self.ingestor.from_bytes(data, name=filename)
         except IngestionError as exc:
             raise ServiceError(str(exc)) from exc
+
         with self.database.session() as session:
             if idempotency_key:
                 existing = session.scalar(
@@ -155,9 +156,13 @@ class DocumentService:
                     document = session.get(StoredDocument, existing.document_id)
                     assert document is not None
                     return document, existing, False
-            object_key = self.store.put(document_input.data)
             tenant = session.get(Tenant, principal.tenant_id)
             assert tenant is not None
+            retention_days = tenant.retention_days
+
+        object_key = self.store.put(document_input.data)
+
+        with self.database.session() as session:
             document = StoredDocument(
                 id=new_id(),
                 tenant_id=principal.tenant_id,
@@ -166,7 +171,7 @@ class DocumentService:
                 media_kind=document_input.kind,
                 size_bytes=document_input.size_bytes,
                 source_object_key=object_key,
-                delete_after=utcnow() + timedelta(days=tenant.retention_days),
+                delete_after=utcnow() + timedelta(days=retention_days),
             )
             job = Job(
                 id=new_id(),
@@ -281,17 +286,21 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+            source_key = document.source_object_key
+            result_key = document.result_object_key
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
-            return True
+
+        self.store.delete(source_key)
+        if result_key:
+            self.store.delete(result_key)
+        return True
 
     def purge_expired(self, *, now=None) -> int:
         current = now or utcnow()
         count = 0
+        keys_to_delete = []
         with self.database.session() as session:
             documents = session.scalars(
                 select(StoredDocument).where(
@@ -301,13 +310,17 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
+                keys_to_delete.append((document.source_object_key, document.result_object_key))
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
             session.commit()
+
+        for source_key, result_key in keys_to_delete:
+            self.store.delete(source_key)
+            if result_key:
+                self.store.delete(result_key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
