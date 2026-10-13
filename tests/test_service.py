@@ -228,3 +228,90 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_shared_object_is_not_deleted_when_one_document_is_purged_or_deleted(
+    tmp_path: Path,
+) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    app = create_app(settings, database=database, store=store)
+
+    with TestClient(app) as client:
+        boot = client.post("/v1/bootstrap", headers={"X-Bootstrap-Token": "bootstrap-test-token"})
+        token = boot.json()["api_key"]
+        headers1 = {"Authorization": f"Bearer {token}", "Idempotency-Key": "req-shared-01"}
+        headers2 = {"Authorization": f"Bearer {token}", "Idempotency-Key": "req-shared-02"}
+        headers3 = {"Authorization": f"Bearer {token}", "Idempotency-Key": "req-shared-03"}
+
+        # Submit three documents with the exact same content
+        content = b"%PDF-1.7\nshared-content"
+        first = client.post(
+            "/v1/documents",
+            headers=headers1,
+            files={"file": ("file1.pdf", content, "application/pdf")},
+        )
+        second = client.post(
+            "/v1/documents",
+            headers=headers2,
+            files={"file": ("file2.pdf", content, "application/pdf")},
+        )
+        third = client.post(
+            "/v1/documents",
+            headers=headers3,
+            files={"file": ("file3.pdf", content, "application/pdf")},
+        )
+
+        assert first.status_code == second.status_code == third.status_code == 202
+        doc_id_1 = first.json()["document"]["id"]
+        doc_id_2 = second.json()["document"]["id"]
+        doc_id_3 = third.json()["document"]["id"]
+
+        service = DocumentService(database, store, settings)
+
+        with database.session() as session:
+            doc1 = session.get(StoredDocument, doc_id_1)
+            doc2 = session.get(StoredDocument, doc_id_2)
+            doc3 = session.get(StoredDocument, doc_id_3)
+            assert doc1 is not None and doc2 is not None and doc3 is not None
+
+            # Verify they share the same object key
+            assert doc1.source_object_key == doc2.source_object_key == doc3.source_object_key
+            shared_key = doc1.source_object_key
+
+            # Manually expire the first document for purge
+            doc1.delete_after = utcnow() - timedelta(days=1)
+            session.commit()
+
+        assert store.exists(shared_key)
+
+        # Test 1: purge_expired should delete doc1 but NOT the shared object
+        count = service.purge_expired()
+        assert count == 1
+
+        with database.session() as session:
+            doc1 = session.get(StoredDocument, doc_id_1)
+            assert doc1 is not None and doc1.status == "deleted"
+
+        assert store.exists(shared_key)
+
+        # Test 2: manual deletion of doc2 should delete doc2 but NOT the shared object
+        assert client.delete(f"/v1/documents/{doc_id_2}", headers=headers2).status_code == 204
+
+        with database.session() as session:
+            doc2 = session.get(StoredDocument, doc_id_2)
+            assert doc2 is not None and doc2.status == "deleted"
+
+        assert store.exists(shared_key)
+
+        # Test 3: manual deletion of doc3 (the last one) SHOULD delete the shared object
+        assert client.delete(f"/v1/documents/{doc_id_3}", headers=headers3).status_code == 204
+
+        with database.session() as session:
+            doc3 = session.get(StoredDocument, doc_id_3)
+            assert doc3 is not None and doc3.status == "deleted"
+
+        assert not store.exists(shared_key)
