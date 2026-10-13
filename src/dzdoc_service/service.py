@@ -270,6 +270,23 @@ class DocumentService:
             session.commit()
         return correction
 
+    def _is_object_key_in_use(self, session, key: str, exclude_document_id: str) -> bool:
+        from sqlalchemy import or_
+
+        existing = session.scalar(
+            select(StoredDocument.id)
+            .where(
+                StoredDocument.id != exclude_document_id,
+                StoredDocument.deleted_at.is_(None),
+                or_(
+                    StoredDocument.source_object_key == key,
+                    StoredDocument.result_object_key == key,
+                ),
+            )
+            .limit(1)
+        )
+        return existing is not None
+
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
         with self.database.session() as session:
@@ -281,8 +298,11 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
+            if not self._is_object_key_in_use(session, document.source_object_key, document.id):
+                self.store.delete(document.source_object_key)
+            if document.result_object_key and not self._is_object_key_in_use(
+                session, document.result_object_key, document.id
+            ):
                 self.store.delete(document.result_object_key)
             document.deleted_at = utcnow()
             document.status = "deleted"
@@ -301,8 +321,11 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
+                if not self._is_object_key_in_use(session, document.source_object_key, document.id):
+                    self.store.delete(document.source_object_key)
+                if document.result_object_key and not self._is_object_key_in_use(
+                    session, document.result_object_key, document.id
+                ):
                     self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
