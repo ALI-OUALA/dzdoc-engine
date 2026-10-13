@@ -79,8 +79,66 @@ def test_idempotent_api_submission_worker_result_and_deletion(tmp_path: Path) ->
         assert payload["document_id"] == "processed-document"
         assert payload["extractions"][0]["schema_name"] == "invoice-dz"
         assert client.get("/v1/usage", headers=headers).json()["documents"] == 1
+
+        # Test deletion
+        with database.session() as session:
+            from dzdoc_service.db import StoredDocument
+
+            doc = session.get(StoredDocument, document_id)
+            assert doc is not None
+            source_object_key = doc.source_object_key
+
+        assert store.exists(source_object_key)
+
         assert client.delete(f"/v1/documents/{document_id}", headers=headers).status_code == 204
         assert client.get(f"/v1/documents/{document_id}", headers=headers).status_code == 404
+        assert not store.exists(source_object_key)
+
+
+def test_purge_expired_documents(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from dzdoc_service.db import StoredDocument
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    document1, _, _ = service.submit(
+        principal, b"%PDF-1.7\n1", filename="test1.pdf", idempotency_key=None
+    )
+    document2, _, _ = service.submit(
+        principal, b"%PDF-1.7\n2", filename="test2.pdf", idempotency_key=None
+    )
+
+    assert store.exists(document1.source_object_key)
+    assert store.exists(document2.source_object_key)
+
+    # Set document1 to be expired
+    with database.session() as session:
+        doc1 = session.get(StoredDocument, document1.id)
+        assert doc1 is not None
+        doc1.delete_after = datetime.now(UTC) - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired()
+    assert count == 1
+
+    assert not store.exists(document1.source_object_key)
+    assert store.exists(document2.source_object_key)
+
+    with database.session() as session:
+        doc1 = session.get(StoredDocument, document1.id)
+        assert doc1 is not None
+        assert doc1.deleted_at is not None
+        assert doc1.status == "deleted"
+
+        doc2 = session.get(StoredDocument, document2.id)
+        assert doc2 is not None
+        assert doc2.deleted_at is None
+        assert doc2.status == "queued"
 
 
 def test_scopes_isolate_review_and_tenants(tmp_path: Path) -> None:
