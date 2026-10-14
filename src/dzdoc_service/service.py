@@ -289,20 +289,26 @@ class DocumentService:
             session.flush()
 
             has_other_source = session.scalar(
-                select(StoredDocument.id).where(
+                select(StoredDocument.id)
+                .where(
                     StoredDocument.deleted_at.is_(None),
-                    (StoredDocument.source_object_key == source_key) | (StoredDocument.result_object_key == source_key)
-                ).limit(1)
+                    (StoredDocument.source_object_key == source_key)
+                    | (StoredDocument.result_object_key == source_key),
+                )
+                .limit(1)
             )
             if not has_other_source:
                 self.store.delete(source_key)
 
             if result_key:
                 has_other_result = session.scalar(
-                    select(StoredDocument.id).where(
+                    select(StoredDocument.id)
+                    .where(
                         StoredDocument.deleted_at.is_(None),
-                        (StoredDocument.source_object_key == result_key) | (StoredDocument.result_object_key == result_key)
-                    ).limit(1)
+                        (StoredDocument.source_object_key == result_key)
+                        | (StoredDocument.result_object_key == result_key),
+                    )
+                    .limit(1)
                 )
                 if not has_other_result:
                     self.store.delete(result_key)
@@ -330,19 +336,25 @@ class DocumentService:
             for document in documents:
                 source_key = document.source_object_key
                 if source_key and not session.scalar(
-                    select(StoredDocument.id).where(
+                    select(StoredDocument.id)
+                    .where(
                         StoredDocument.deleted_at.is_(None),
-                        (StoredDocument.source_object_key == source_key) | (StoredDocument.result_object_key == source_key)
-                    ).limit(1)
+                        (StoredDocument.source_object_key == source_key)
+                        | (StoredDocument.result_object_key == source_key),
+                    )
+                    .limit(1)
                 ):
                     self.store.delete(source_key)
 
                 result_key = document.result_object_key
                 if result_key and not session.scalar(
-                    select(StoredDocument.id).where(
+                    select(StoredDocument.id)
+                    .where(
                         StoredDocument.deleted_at.is_(None),
-                        (StoredDocument.source_object_key == result_key) | (StoredDocument.result_object_key == result_key)
-                    ).limit(1)
+                        (StoredDocument.source_object_key == result_key)
+                        | (StoredDocument.result_object_key == result_key),
+                    )
+                    .limit(1)
                 ):
                     self.store.delete(result_key)
             session.commit()

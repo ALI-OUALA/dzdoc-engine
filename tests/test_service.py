@@ -229,6 +229,7 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
 
+
 def test_shared_object_keys_not_deleted(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
@@ -238,8 +239,12 @@ def test_shared_object_keys_not_deleted(tmp_path: Path) -> None:
 
     # Submit the same file twice to get identical source_object_key
     pdf_content = b"%PDF-1.7\nshared content"
-    doc1, job1, created1 = service.submit(admin, pdf_content, filename="file1.pdf", idempotency_key=None)
-    doc2, job2, created2 = service.submit(admin, pdf_content, filename="file2.pdf", idempotency_key=None)
+    doc1, job1, created1 = service.submit(
+        admin, pdf_content, filename="file1.pdf", idempotency_key=None
+    )
+    doc2, job2, created2 = service.submit(
+        admin, pdf_content, filename="file2.pdf", idempotency_key=None
+    )
 
     assert doc1.source_object_key == doc2.source_object_key
     assert doc1.id != doc2.id
@@ -262,7 +267,8 @@ def test_shared_object_keys_not_deleted(tmp_path: Path) -> None:
 
 def test_purge_shared_object_keys_not_deleted(tmp_path: Path) -> None:
     from datetime import timedelta
-    from dzdoc_service.db import utcnow, StoredDocument
+
+    from dzdoc_service.db import StoredDocument, utcnow
 
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
@@ -271,8 +277,12 @@ def test_purge_shared_object_keys_not_deleted(tmp_path: Path) -> None:
     assert admin is not None
 
     pdf_content = b"%PDF-1.7\npurged content"
-    doc1, job1, created1 = service.submit(admin, pdf_content, filename="file1.pdf", idempotency_key=None)
-    doc2, job2, created2 = service.submit(admin, pdf_content, filename="file2.pdf", idempotency_key=None)
+    doc1, job1, created1 = service.submit(
+        admin, pdf_content, filename="file1.pdf", idempotency_key=None
+    )
+    doc2, job2, created2 = service.submit(
+        admin, pdf_content, filename="file2.pdf", idempotency_key=None
+    )
 
     key = doc1.source_object_key
     assert store.exists(key)
