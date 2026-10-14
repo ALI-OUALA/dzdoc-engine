@@ -228,3 +228,74 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_shared_object_keys_not_deleted(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Submit the same file twice to get identical source_object_key
+    pdf_content = b"%PDF-1.7\nshared content"
+    doc1, job1, created1 = service.submit(
+        admin, pdf_content, filename="file1.pdf", idempotency_key=None
+    )
+    doc2, job2, created2 = service.submit(
+        admin, pdf_content, filename="file2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert doc1.id != doc2.id
+
+    key = doc1.source_object_key
+    assert store.exists(key)
+
+    # Delete first document
+    service.delete_document(admin, doc1.id)
+
+    # The key should still exist because doc2 references it
+    assert store.exists(key), "Object store key was deleted prematurely!"
+
+    # Delete second document
+    service.delete_document(admin, doc2.id)
+
+    # Now it should be deleted
+    assert not store.exists(key), "Object store key should be deleted now."
+
+
+def test_purge_shared_object_keys_not_deleted(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    pdf_content = b"%PDF-1.7\npurged content"
+    doc1, job1, created1 = service.submit(
+        admin, pdf_content, filename="file1.pdf", idempotency_key=None
+    )
+    doc2, job2, created2 = service.submit(
+        admin, pdf_content, filename="file2.pdf", idempotency_key=None
+    )
+
+    key = doc1.source_object_key
+    assert store.exists(key)
+
+    with database.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d1 is not None and d2 is not None
+        d1.delete_after = utcnow() - timedelta(days=1)
+        # d2 is not expired
+        d2.delete_after = utcnow() + timedelta(days=1)
+        session.commit()
+
+    service.purge_expired()
+
+    assert store.exists(key), "Object store key was purged prematurely!"
