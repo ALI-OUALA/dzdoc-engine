@@ -281,11 +281,32 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+
+            source_key = document.source_object_key
+            result_key = document.result_object_key
             document.deleted_at = utcnow()
             document.status = "deleted"
+            session.flush()
+
+            has_other_source = session.scalar(
+                select(StoredDocument.id).where(
+                    StoredDocument.deleted_at.is_(None),
+                    (StoredDocument.source_object_key == source_key) | (StoredDocument.result_object_key == source_key)
+                ).limit(1)
+            )
+            if not has_other_source:
+                self.store.delete(source_key)
+
+            if result_key:
+                has_other_result = session.scalar(
+                    select(StoredDocument.id).where(
+                        StoredDocument.deleted_at.is_(None),
+                        (StoredDocument.source_object_key == result_key) | (StoredDocument.result_object_key == result_key)
+                    ).limit(1)
+                )
+                if not has_other_result:
+                    self.store.delete(result_key)
+
             session.commit()
             return True
 
@@ -301,12 +322,29 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
+            session.flush()
+
+            for document in documents:
+                source_key = document.source_object_key
+                if source_key and not session.scalar(
+                    select(StoredDocument.id).where(
+                        StoredDocument.deleted_at.is_(None),
+                        (StoredDocument.source_object_key == source_key) | (StoredDocument.result_object_key == source_key)
+                    ).limit(1)
+                ):
+                    self.store.delete(source_key)
+
+                result_key = document.result_object_key
+                if result_key and not session.scalar(
+                    select(StoredDocument.id).where(
+                        StoredDocument.deleted_at.is_(None),
+                        (StoredDocument.source_object_key == result_key) | (StoredDocument.result_object_key == result_key)
+                    ).limit(1)
+                ):
+                    self.store.delete(result_key)
             session.commit()
         return count
 
