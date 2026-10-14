@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from dzdoc.ingestion import IngestionError, SecureIngestor
@@ -270,6 +270,19 @@ class DocumentService:
             session.commit()
         return correction
 
+    def _is_object_key_referenced(self, session, key: str, exclude_id: str) -> bool:
+        count = session.scalar(
+            select(func.count()).where(
+                or_(
+                    StoredDocument.source_object_key == key,
+                    StoredDocument.result_object_key == key,
+                ),
+                StoredDocument.id != exclude_id,
+                StoredDocument.deleted_at.is_(None),
+            )
+        )
+        return bool(count)
+
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
         with self.database.session() as session:
@@ -281,8 +294,12 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
+
+            if not self._is_object_key_referenced(session, document.source_object_key, document.id):
+                self.store.delete(document.source_object_key)
+            if document.result_object_key and not self._is_object_key_referenced(
+                session, document.result_object_key, document.id
+            ):
                 self.store.delete(document.result_object_key)
             document.deleted_at = utcnow()
             document.status = "deleted"
@@ -301,8 +318,13 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
+                if not self._is_object_key_referenced(
+                    session, document.source_object_key, document.id
+                ):
+                    self.store.delete(document.source_object_key)
+                if document.result_object_key and not self._is_object_key_referenced(
+                    session, document.result_object_key, document.id
+                ):
                     self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
