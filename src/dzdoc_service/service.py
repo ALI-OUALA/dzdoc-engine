@@ -290,18 +290,22 @@ class DocumentService:
             session.commit()
 
             if not session.scalar(
-                select(1).where(
+                select(1)
+                .where(
                     StoredDocument.source_object_key == source_key,
                     StoredDocument.deleted_at.is_(None),
-                ).limit(1)
+                )
+                .limit(1)
             ):
                 self.store.delete(source_key)
             if result_key:
                 if not session.scalar(
-                    select(1).where(
+                    select(1)
+                    .where(
                         StoredDocument.result_object_key == result_key,
                         StoredDocument.deleted_at.is_(None),
-                    ).limit(1)
+                    )
+                    .limit(1)
                 ):
                     self.store.delete(result_key)
 
@@ -330,18 +334,22 @@ class DocumentService:
 
             for source_key in source_keys:
                 if not session.scalar(
-                    select(1).where(
+                    select(1)
+                    .where(
                         StoredDocument.source_object_key == source_key,
                         StoredDocument.deleted_at.is_(None),
-                    ).limit(1)
+                    )
+                    .limit(1)
                 ):
                     self.store.delete(source_key)
             for result_key in result_keys:
                 if not session.scalar(
-                    select(1).where(
+                    select(1)
+                    .where(
                         StoredDocument.result_object_key == result_key,
                         StoredDocument.deleted_at.is_(None),
-                    ).limit(1)
+                    )
+                    .limit(1)
                 ):
                     self.store.delete(result_key)
 
