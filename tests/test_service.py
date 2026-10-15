@@ -228,3 +228,69 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_shared_object_storage_preserves_object_on_deletion(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    data = b"%PDF-1.7 shared object content for deletion test\n"
+
+    doc1, _, _ = service.submit(admin, data, filename="first.pdf", idempotency_key=None)
+    doc2, _, _ = service.submit(admin, data, filename="second.pdf", idempotency_key=None)
+
+    assert doc1.source_object_key == doc2.source_object_key
+    key = doc1.source_object_key
+
+    assert store.exists(key)
+
+    service.delete_document(admin, doc1.id)
+
+    assert store.exists(key), "Object was deleted prematurely!"
+
+    service.delete_document(admin, doc2.id)
+
+    assert not store.exists(key), "Object was not deleted after last reference removed!"
+
+
+def test_shared_result_object_storage_preserves_object_on_deletion(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # distinct byte contents to not conflict with other tests
+    data1 = b"%PDF-1.7 shared result test content 1\n"
+    data2 = b"%PDF-1.7 shared result test content 2\n"
+
+    doc1, _, _ = service.submit(admin, data1, filename="first.pdf", idempotency_key=None)
+    doc2, _, _ = service.submit(admin, data2, filename="first.pdf", idempotency_key=None)
+
+    # FakePipeline processes bytes but ignores input and returns the same fake document
+    # the result bytes payload will be identical, so result_object_key will match.
+    worker = Worker(database, store, settings, pipeline=FakePipeline())
+    worker.run_once()  # processes job1
+    worker.run_once()  # processes job2
+
+    doc1 = service.get_document(admin, doc1.id)
+    doc2 = service.get_document(admin, doc2.id)
+
+    assert doc1 is not None and doc2 is not None
+    assert doc1.result_object_key is not None
+    assert doc1.result_object_key == doc2.result_object_key
+
+    key = doc1.result_object_key
+
+    assert store.exists(key)
+
+    service.delete_document(admin, doc1.id)
+
+    assert store.exists(key), "Result object was deleted prematurely!"
+
+    service.delete_document(admin, doc2.id)
+
+    assert not store.exists(key), "Result object was not deleted after last reference removed!"
