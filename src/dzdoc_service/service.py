@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from dzdoc.ingestion import IngestionError, SecureIngestor
@@ -279,14 +279,43 @@ class DocumentService:
                     StoredDocument.tenant_id == principal.tenant_id,
                 )
             )
-            if document is None:
+            if document is None or document.deleted_at is not None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
+
+            source_key = document.source_object_key
+            result_key = document.result_object_key
+
+            has_source_ref = session.scalar(
+                select(StoredDocument.id).where(
+                    StoredDocument.id != document_id,
+                    StoredDocument.deleted_at.is_(None),
+                    or_(
+                        StoredDocument.source_object_key == source_key,
+                        StoredDocument.result_object_key == source_key,
+                    )
+                ).limit(1)
+            )
+            if not has_source_ref:
+                self.store.delete(source_key)
+
+            if result_key:
+                has_result_ref = session.scalar(
+                    select(StoredDocument.id).where(
+                        StoredDocument.id != document_id,
+                        StoredDocument.deleted_at.is_(None),
+                        or_(
+                            StoredDocument.source_object_key == result_key,
+                            StoredDocument.result_object_key == result_key,
+                        )
+                    ).limit(1)
+                )
+                if not has_result_ref:
+                    self.store.delete(result_key)
+
             return True
 
     def purge_expired(self, *, now=None) -> int:
@@ -300,14 +329,42 @@ class DocumentService:
                     StoredDocument.delete_after <= current,
                 )
             ).all()
+
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
             session.commit()
+
+            for document in documents:
+                source_key = document.source_object_key
+                result_key = document.result_object_key
+
+                has_source_ref = session.scalar(
+                    select(StoredDocument.id).where(
+                        StoredDocument.deleted_at.is_(None),
+                        or_(
+                            StoredDocument.source_object_key == source_key,
+                            StoredDocument.result_object_key == source_key,
+                        )
+                    ).limit(1)
+                )
+                if not has_source_ref:
+                    self.store.delete(source_key)
+
+                if result_key:
+                    has_result_ref = session.scalar(
+                        select(StoredDocument.id).where(
+                            StoredDocument.deleted_at.is_(None),
+                            or_(
+                                StoredDocument.source_object_key == result_key,
+                                StoredDocument.result_object_key == result_key,
+                            )
+                        ).limit(1)
+                    )
+                    if not has_result_ref:
+                        self.store.delete(result_key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
