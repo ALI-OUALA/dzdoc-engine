@@ -290,28 +290,32 @@ class DocumentService:
             result_key = document.result_object_key
 
             has_source_ref = session.scalar(
-                select(StoredDocument.id).where(
+                select(StoredDocument.id)
+                .where(
                     StoredDocument.id != document_id,
                     StoredDocument.deleted_at.is_(None),
                     or_(
                         StoredDocument.source_object_key == source_key,
                         StoredDocument.result_object_key == source_key,
-                    )
-                ).limit(1)
+                    ),
+                )
+                .limit(1)
             )
             if not has_source_ref:
                 self.store.delete(source_key)
 
             if result_key:
                 has_result_ref = session.scalar(
-                    select(StoredDocument.id).where(
+                    select(StoredDocument.id)
+                    .where(
                         StoredDocument.id != document_id,
                         StoredDocument.deleted_at.is_(None),
                         or_(
                             StoredDocument.source_object_key == result_key,
                             StoredDocument.result_object_key == result_key,
-                        )
-                    ).limit(1)
+                        ),
+                    )
+                    .limit(1)
                 )
                 if not has_result_ref:
                     self.store.delete(result_key)
@@ -341,26 +345,30 @@ class DocumentService:
                 result_key = document.result_object_key
 
                 has_source_ref = session.scalar(
-                    select(StoredDocument.id).where(
+                    select(StoredDocument.id)
+                    .where(
                         StoredDocument.deleted_at.is_(None),
                         or_(
                             StoredDocument.source_object_key == source_key,
                             StoredDocument.result_object_key == source_key,
-                        )
-                    ).limit(1)
+                        ),
+                    )
+                    .limit(1)
                 )
                 if not has_source_ref:
                     self.store.delete(source_key)
 
                 if result_key:
                     has_result_ref = session.scalar(
-                        select(StoredDocument.id).where(
+                        select(StoredDocument.id)
+                        .where(
                             StoredDocument.deleted_at.is_(None),
                             or_(
                                 StoredDocument.source_object_key == result_key,
                                 StoredDocument.result_object_key == result_key,
-                            )
-                        ).limit(1)
+                            ),
+                        )
+                        .limit(1)
                     )
                     if not has_result_ref:
                         self.store.delete(result_key)

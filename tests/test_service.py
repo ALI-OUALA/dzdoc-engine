@@ -229,6 +229,7 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
 
+
 def test_shared_object_storage_preserves_object_on_deletion(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
@@ -255,7 +256,6 @@ def test_shared_object_storage_preserves_object_on_deletion(tmp_path: Path) -> N
     assert not store.exists(key), "Object was not deleted after last reference removed!"
 
 
-
 def test_shared_result_object_storage_preserves_object_on_deletion(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
@@ -273,8 +273,8 @@ def test_shared_result_object_storage_preserves_object_on_deletion(tmp_path: Pat
     # FakePipeline processes bytes but ignores input and returns the same fake document
     # the result bytes payload will be identical, so result_object_key will match.
     worker = Worker(database, store, settings, pipeline=FakePipeline())
-    worker.run_once() # processes job1
-    worker.run_once() # processes job2
+    worker.run_once()  # processes job1
+    worker.run_once()  # processes job2
 
     doc1 = service.get_document(admin, doc1.id)
     doc2 = service.get_document(admin, doc2.id)
