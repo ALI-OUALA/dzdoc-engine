@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from dzdoc.ingestion import IngestionError, SecureIngestor
@@ -270,6 +270,22 @@ class DocumentService:
             session.commit()
         return correction
 
+    def _garbage_collect_object(self, object_key: str) -> None:
+        with self.database.session() as session:
+            in_use = session.scalar(
+                select(1)
+                .where(
+                    StoredDocument.deleted_at.is_(None),
+                    or_(
+                        StoredDocument.source_object_key == object_key,
+                        StoredDocument.result_object_key == object_key,
+                    ),
+                )
+                .limit(1)
+            )
+        if not in_use:
+            self.store.delete(object_key)
+
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
         with self.database.session() as session:
@@ -281,17 +297,25 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+
+            source_key = document.source_object_key
+            result_key = document.result_object_key
+
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
-            return True
+
+        self._garbage_collect_object(source_key)
+        if result_key:
+            self._garbage_collect_object(result_key)
+
+        return True
 
     def purge_expired(self, *, now=None) -> int:
         current = now or utcnow()
         count = 0
+        keys_to_check = set()
+
         with self.database.session() as session:
             documents = session.scalars(
                 select(StoredDocument).where(
@@ -301,13 +325,18 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
+                keys_to_check.add(document.source_object_key)
                 if document.result_object_key:
-                    self.store.delete(document.result_object_key)
+                    keys_to_check.add(document.result_object_key)
+
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
             session.commit()
+
+        for key in keys_to_check:
+            self._garbage_collect_object(key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
