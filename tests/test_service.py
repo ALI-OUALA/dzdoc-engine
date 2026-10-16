@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -228,3 +229,64 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_purge_deduplication(tmp_path: Path):
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal, b"%PDF-1.7\ncontent A", filename="A1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        principal, b"%PDF-1.7\ncontent A", filename="A2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    # Make doc1 expire
+    with database.session() as session:
+        from dzdoc_service.db import StoredDocument
+
+        d = session.get(StoredDocument, doc1.id)
+        assert d is not None
+        d.delete_after = datetime.now(UTC) - timedelta(days=1)
+        session.commit()
+
+    # Purge expired
+    count = service.purge_expired()
+    assert count == 1
+
+    # Store file should still exist since doc2 is using it
+    assert store.exists(doc2.source_object_key)
+
+
+def test_deletion_deduplication(tmp_path: Path):
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Upload same document twice to simulate deduplication
+    doc1, job1, _ = service.submit(
+        principal, b"%PDF-1.7\nduplicate content 1", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, job2, _ = service.submit(
+        principal, b"%PDF-1.7\nduplicate content 1", filename="doc2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    # Delete doc1
+    service.delete_document(principal, doc1.id)
+
+    # The store file should still exist because doc2 is using it!
+    assert store.exists(doc2.source_object_key)
