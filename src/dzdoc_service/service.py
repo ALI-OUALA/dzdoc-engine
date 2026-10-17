@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from dzdoc.ingestion import IngestionError, SecureIngestor
@@ -270,6 +270,23 @@ class DocumentService:
             session.commit()
         return correction
 
+    def _is_object_in_use(self, session, key: str, exclude_id: str) -> bool:
+        return (
+            session.scalar(
+                select(1)
+                .where(
+                    or_(
+                        StoredDocument.source_object_key == key,
+                        StoredDocument.result_object_key == key,
+                    ),
+                    StoredDocument.id != exclude_id,
+                    StoredDocument.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
         with self.database.session() as session:
@@ -281,9 +298,19 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
+
+            source_in_use = self._is_object_in_use(session, document.source_object_key, document.id)
+            result_in_use = False
             if document.result_object_key:
+                result_in_use = self._is_object_in_use(
+                    session, document.result_object_key, document.id
+                )
+
+            if not source_in_use:
+                self.store.delete(document.source_object_key)
+            if document.result_object_key and not result_in_use:
                 self.store.delete(document.result_object_key)
+
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
@@ -301,9 +328,20 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
+                source_in_use = self._is_object_in_use(
+                    session, document.source_object_key, document.id
+                )
+                result_in_use = False
                 if document.result_object_key:
+                    result_in_use = self._is_object_in_use(
+                        session, document.result_object_key, document.id
+                    )
+
+                if not source_in_use:
+                    self.store.delete(document.source_object_key)
+                if document.result_object_key and not result_in_use:
                     self.store.delete(document.result_object_key)
+
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
