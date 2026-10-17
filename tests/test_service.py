@@ -228,3 +228,75 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Submit the same file twice to get identical source_object_key
+    file_content = b"%PDF-1.7\nshared"
+    doc1, job1, _ = service.submit(principal, file_content, filename="1.pdf", idempotency_key=None)
+    doc2, job2, _ = service.submit(principal, file_content, filename="2.pdf", idempotency_key=None)
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    # Deleting doc1 should soft-delete the document but preserve the storage object
+    assert service.delete_document(principal, doc1.id) is True
+
+    with database.session() as session:
+        from dzdoc_service.db import StoredDocument
+
+        d1 = session.get(StoredDocument, doc1.id)
+        assert d1 is not None and d1.deleted_at is not None
+
+    assert store.exists(doc1.source_object_key)
+
+    # Deleting doc2 should delete the storage object since no active docs reference it
+    assert service.delete_document(principal, doc2.id) is True
+    assert not store.exists(doc2.source_object_key)
+
+
+def test_purge_expired_preserves_shared_objects(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    file_content = b"%PDF-1.7\npurge"
+    doc1, _, _ = service.submit(principal, file_content, filename="1.pdf", idempotency_key=None)
+    doc2, _, _ = service.submit(principal, file_content, filename="2.pdf", idempotency_key=None)
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    with database.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        d1.delete_after = utcnow() - timedelta(hours=1)
+        session.commit()
+
+    # Purge should soft-delete doc1 but preserve object since doc2 is active
+    purged_count = service.purge_expired()
+    assert purged_count == 1
+    assert store.exists(doc1.source_object_key)
+
+    with database.session() as session:
+        d2 = session.get(StoredDocument, doc2.id)
+        d2.delete_after = utcnow() - timedelta(hours=1)
+        session.commit()
+
+    # Purge should now delete the object
+    purged_count = service.purge_expired()
+    assert purged_count == 1
+    assert not store.exists(doc2.source_object_key)
