@@ -228,3 +228,74 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_deletion_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, job1, created1 = service.submit(
+        principal, b"%PDF-1.7\n duplicate_data", filename="1.pdf", idempotency_key=None
+    )
+    doc2, job2, created2 = service.submit(
+        principal, b"%PDF-1.7\n duplicate_data", filename="2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    service.delete_document(principal, doc1.id)
+    assert store.exists(doc2.source_object_key)
+
+    service.delete_document(principal, doc2.id)
+    assert not store.exists(doc1.source_object_key)
+
+
+def test_purge_preserves_shared_objects(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from dzdoc_service.db import StoredDocument
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal, b"%PDF-1.7\n duplicate_data", filename="1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        principal, b"%PDF-1.7\n duplicate_data", filename="2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    now = datetime.now(UTC)
+    with database.session() as session:
+        db_doc1 = session.get(StoredDocument, doc1.id)
+        assert db_doc1 is not None
+        db_doc1.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired(now=now)
+    assert count == 1
+
+    assert store.exists(doc2.source_object_key)
+
+    with database.session() as session:
+        db_doc2 = session.get(StoredDocument, doc2.id)
+        assert db_doc2 is not None
+        db_doc2.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired(now=now)
+    assert count == 1
+
+    assert not store.exists(doc1.source_object_key)
