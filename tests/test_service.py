@@ -228,3 +228,94 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_preserves_shared_objects_and_avoids_io_in_session(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, job1, created1 = service.submit(
+        principal, b"%PDF-1.7\ncontent", filename="doc1.pdf", idempotency_key="doc1-idempotency"
+    )
+    doc2, job2, created2 = service.submit(
+        principal, b"%PDF-1.7\ncontent", filename="doc2.pdf", idempotency_key="doc2-idempotency"
+    )
+    assert doc1.source_object_key == doc2.source_object_key
+
+    # Run worker to generate result
+    worker = Worker(database, store, settings, pipeline=FakePipeline())
+    worker.run_once()  # doc1
+    worker.run_once()  # doc2
+
+    with database.session() as session:
+        from dzdoc_service.db import StoredDocument
+
+        d1 = session.get(StoredDocument, doc1.id)
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d1 is not None and d2 is not None
+        assert d1.result_object_key is not None
+        assert (
+            d1.result_object_key != d2.result_object_key
+        )  # Different source names produce different result payloads
+
+    assert store.exists(doc1.source_object_key)
+
+    assert service.delete_document(principal, doc1.id) is True
+
+    # doc1 is deleted, but doc2 still references the source object
+    assert store.exists(doc1.source_object_key) is True
+
+    assert service.delete_document(principal, doc2.id) is True
+
+    # Both deleted, source object should be gone
+    assert store.exists(doc1.source_object_key) is False
+
+
+def test_purge_expired_preserves_shared_objects_and_avoids_io_in_session(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal, b"%PDF-1.7\nshared_content", filename="d1.txt", idempotency_key="d1-idempotency"
+    )
+    doc2, _, _ = service.submit(
+        principal, b"%PDF-1.7\nshared_content", filename="d2.txt", idempotency_key="d2-idempotency"
+    )
+
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    now = utcnow()
+
+    with database.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        assert d1 is not None
+        d1.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    assert store.exists(doc1.source_object_key) is True
+
+    count = service.purge_expired(now=now)
+    assert count == 1
+
+    # doc1 purged, but doc2 still references the source object
+    assert store.exists(doc1.source_object_key) is True
+
+    with database.session() as session:
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d2 is not None
+        d2.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired(now=now)
+    assert count == 1
+
+    # Both purged, source object should be gone
+    assert store.exists(doc1.source_object_key) is False
