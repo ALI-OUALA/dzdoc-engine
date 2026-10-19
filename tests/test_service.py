@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -228,3 +229,90 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Submit two identical byte streams with different filenames to create distinct StoredDocuments
+    # but with identical underlying source object keys in the object store.
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared-content", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared-content", filename="doc2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    shared_key = doc1.source_object_key
+
+    assert store.exists(shared_key)
+
+    # Delete the first document
+    assert service.delete_document(admin, doc1.id) is True
+
+    # The underlying object must STILL exist because doc2 references it
+    assert store.exists(shared_key)
+
+    # Delete the second document
+    assert service.delete_document(admin, doc2.id) is True
+
+    # Now that no active document references the key, it should be deleted
+    assert not store.exists(shared_key)
+
+
+def test_purge_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\npurge-shared", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        admin, b"%PDF-1.7\npurge-shared", filename="doc2.pdf", idempotency_key=None
+    )
+    doc3, _, _ = service.submit(
+        admin, b"%PDF-1.7\ndistinct", filename="doc3.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    shared_key = doc1.source_object_key
+    distinct_key = doc3.source_object_key
+
+    # Manually expire doc1 and doc3
+    from datetime import datetime, timedelta
+
+    from dzdoc_service.db import StoredDocument
+
+    now = datetime.now(UTC)
+
+    with database.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        assert d1 is not None
+        d1.delete_after = now - timedelta(days=1)
+
+        d3 = session.get(StoredDocument, doc3.id)
+        assert d3 is not None
+        d3.delete_after = now - timedelta(days=1)
+
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d2 is not None
+        d2.delete_after = now + timedelta(days=1)  # Don't expire yet
+
+        session.commit()
+
+    # Run purge
+    assert service.purge_expired(now=now) == 2
+
+    # doc1 and doc3 are purged.
+    # distinct_key (doc3) should be deleted from the store.
+    assert not store.exists(distinct_key)
+    # shared_key (doc1, doc2) should NOT be deleted from the store because doc2 is still active.
+    assert store.exists(shared_key)
