@@ -228,3 +228,101 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_deduplication(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant_id, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Submit two identical documents to trigger deduplication
+    doc1, job1, created1 = service.submit(
+        admin, b"%PDF-1.7 shared content", filename="doc1.txt", idempotency_key="key1234567"
+    )
+    doc2, job2, created2 = service.submit(
+        admin, b"%PDF-1.7 shared content", filename="doc2.txt", idempotency_key="key1234568"
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    # Delete the first document
+    assert service.delete_document(admin, doc1.id) is True
+
+    # The first document should be softly deleted
+    doc1_ref = service.get_document(admin, doc1.id)
+    assert doc1_ref is None  # `get_document` filters out deleted documents
+
+    # The underlying object key should STILL exist because doc2 references it
+    assert store.exists(doc1.source_object_key)
+
+    # Delete the second document
+    assert service.delete_document(admin, doc2.id) is True
+
+    # Now the underlying object should be physically deleted
+    assert not store.exists(doc1.source_object_key)
+
+
+def test_purge_expired_deduplication(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant_id, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, job1, created1 = service.submit(
+        admin, b"%PDF-1.7 shared content purge", filename="doc1.txt", idempotency_key="key1234567"
+    )
+    doc2, job2, created2 = service.submit(
+        admin, b"%PDF-1.7 shared content purge", filename="doc2.txt", idempotency_key="key1234568"
+    )
+    doc3, job3, created3 = service.submit(
+        admin, b"%PDF-1.7 shared content purge", filename="doc3.txt", idempotency_key="key1234569"
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key == doc3.source_object_key
+    shared_key = doc1.source_object_key
+    assert store.exists(shared_key)
+
+    # Set doc1 and doc2 to expire earlier
+    with database.session() as session:
+        from datetime import UTC, datetime, timedelta
+
+        from dzdoc_service.db import StoredDocument
+
+        now = datetime.now(UTC)
+        d1 = session.get(StoredDocument, doc1.id)
+        d2 = session.get(StoredDocument, doc2.id)
+        d3 = session.get(StoredDocument, doc3.id)
+        assert d1 and d2 and d3
+        d1.delete_after = now - timedelta(days=1)
+        d2.delete_after = now - timedelta(days=1)
+        d3.delete_after = now + timedelta(days=10)  # doc3 will remain active
+        session.commit()
+
+    # Purge expired documents
+    purged_count = service.purge_expired()
+    assert purged_count == 2
+
+    # The shared object should still exist because doc3 is active
+    assert store.exists(shared_key)
+
+    # Now expire doc3
+    with database.session() as session:
+        from datetime import UTC, datetime, timedelta
+
+        from dzdoc_service.db import StoredDocument
+
+        now = datetime.now(UTC)
+        d3 = session.get(StoredDocument, doc3.id)
+        assert d3
+        d3.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    purged_count2 = service.purge_expired()
+    assert purged_count2 == 1
+
+    # Now the shared object should be deleted
+    assert not store.exists(shared_key)
