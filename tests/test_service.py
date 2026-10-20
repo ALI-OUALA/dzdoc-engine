@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from dzdoc.models import Checksum, Document, Page, Provenance
 from dzdoc_service.api import create_app
 from dzdoc_service.config import ServiceSettings
-from dzdoc_service.db import Database
+from dzdoc_service.db import Database, StoredDocument
 from dzdoc_service.service import DocumentService
 from dzdoc_service.storage import LocalObjectStore
 from dzdoc_service.worker import Worker
@@ -228,3 +228,105 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_preserves_shared_objects(tmp_path):
+    settings = ServiceSettings(
+        database_url=f"sqlite:///{tmp_path}/test.db",
+        object_root=tmp_path / "objects",
+    )
+    db = Database(settings.database_url)
+    db.create_schema()
+    store = LocalObjectStore(settings.object_root)
+    service = DocumentService(db, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal,
+        b"%PDF-1.7 identical content",
+        filename="doc1.pdf",
+        idempotency_key="key_111111",
+    )
+
+    doc2, _, _ = service.submit(
+        principal,
+        b"%PDF-1.7 identical content",
+        filename="doc2.pdf",
+        idempotency_key="key_222222",
+    )
+
+    with db.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d1.source_object_key == d2.source_object_key
+        shared_key = d1.source_object_key
+
+    assert store.exists(shared_key)
+    assert service.delete_document(principal, doc1.id)
+    assert store.exists(shared_key)
+
+
+def test_purge_expired_preserves_shared_objects(tmp_path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import utcnow
+
+    settings = ServiceSettings(
+        database_url=f"sqlite:///{tmp_path}/test.db",
+        object_root=tmp_path / "objects",
+    )
+    db = Database(settings.database_url)
+    db.create_schema()
+    store = LocalObjectStore(settings.object_root)
+    service = DocumentService(db, store, settings)
+
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal,
+        b"%PDF-1.7 identical content for purge",
+        filename="doc1.pdf",
+        idempotency_key="key_11111111",
+    )
+
+    doc2, _, _ = service.submit(
+        principal,
+        b"%PDF-1.7 identical content for purge",
+        filename="doc2.pdf",
+        idempotency_key="key_22222222",
+    )
+
+    with db.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d1.source_object_key == d2.source_object_key
+        shared_key = d1.source_object_key
+
+        # Manually expire d1
+        d1.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    assert store.exists(shared_key)
+
+    # Purge should remove d1, but keep shared_key because d2 uses it
+    count = service.purge_expired()
+    assert count == 1
+
+    assert store.exists(shared_key)
+
+    # Expire d2 as well
+    with db.session() as session:
+        d2 = session.get(StoredDocument, doc2.id)
+        d2.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired()
+    assert count == 1
+
+    # Now shared_key should be gone
+    assert not store.exists(shared_key)
