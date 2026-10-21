@@ -83,6 +83,66 @@ def test_idempotent_api_submission_worker_result_and_deletion(tmp_path: Path) ->
         assert client.get(f"/v1/documents/{document_id}", headers=headers).status_code == 404
 
 
+def test_delete_and_purge_preserve_deduplicated_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _, admin_token = service.bootstrap()
+    principal = service.authenticate(admin_token)
+    assert principal is not None
+
+    content = b"%PDF-1.7 same content for both"
+    import uuid
+
+    doc1, _, _ = service.submit(
+        principal, content, filename="doc1.pdf", idempotency_key=str(uuid.uuid4())
+    )
+    doc2, _, _ = service.submit(
+        principal, content, filename="doc2.pdf", idempotency_key=str(uuid.uuid4())
+    )
+    doc3, _, _ = service.submit(
+        principal, content, filename="doc3.pdf", idempotency_key=str(uuid.uuid4())
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert doc2.source_object_key == doc3.source_object_key
+    key = doc1.source_object_key
+
+    # Manual delete
+    assert service.delete_document(principal, doc1.id) is True
+    assert store.get(key) == content  # should still be there for doc2 and doc3
+
+    # Purge expired
+    from datetime import UTC, datetime, timedelta
+
+    from dzdoc_service.db import StoredDocument
+
+    with database.session() as session:
+        d2 = session.get(StoredDocument, doc2.id)
+        assert d2 is not None
+        d2.delete_after = datetime.now(UTC) - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired()
+    assert count == 1
+    assert store.get(key) == content  # should still be there for doc3
+
+    # Purge the last one
+    with database.session() as session:
+        d3 = session.get(StoredDocument, doc3.id)
+        assert d3 is not None
+        d3.delete_after = datetime.now(UTC) - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired()
+    assert count == 1
+
+    # Now it should be gone
+    import pytest
+
+    with pytest.raises(Exception):
+        store.get(key)
+
+
 def test_scopes_isolate_review_and_tenants(tmp_path: Path) -> None:
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
