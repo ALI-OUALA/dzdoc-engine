@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -228,3 +229,53 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal, b"%PDF-1.7\nSHARED", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        principal, b"%PDF-1.7\nSHARED", filename="doc2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    service.delete_document(principal, doc1.id)
+
+    # Wait, doc1 object is detached. We need to fetch it or check.
+    # The store should still have the object because doc2 is active.
+    assert store.exists(doc2.source_object_key)
+
+
+def test_purge_expired_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    doc1, _, _ = service.submit(
+        principal, b"%PDF-1.7\nSHARED", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        principal, b"%PDF-1.7\nSHARED", filename="doc2.pdf", idempotency_key=None
+    )
+
+    now = datetime.now(UTC)
+    with database.session() as session:
+        from dzdoc_service.db import StoredDocument
+
+        d1 = session.get(StoredDocument, doc1.id)
+        d1.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    service.purge_expired(now=now)
+    assert store.exists(doc2.source_object_key)
