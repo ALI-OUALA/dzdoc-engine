@@ -228,3 +228,135 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_delete_document_keeps_shared_objects(tmp_path: Path) -> None:
+    from dzdoc_service.worker import Worker
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Submit two documents with IDENTICAL content (different names to avoid any idempotency caching)
+    # The identical content will produce the exact same sha256 and source_object_key
+    file_content = b"%PDF-1.7\nDuplicate-Content"
+    doc1, job1, _ = service.submit(
+        principal, file_content, filename="doc1.pdf", idempotency_key="request-doc1"
+    )
+    doc2, job2, _ = service.submit(
+        principal, file_content, filename="doc2.pdf", idempotency_key="request-doc2"
+    )
+
+    # Both documents should point to the exact same source object key
+    assert doc1.source_object_key == doc2.source_object_key
+
+    # Process both to generate results (FakePipeline returns static fake document,
+    # so we change the fake pipeline response slightly or just use the same)
+    # The source name is injected into the output, so the results will have different bytes!
+    worker = Worker(database, store, settings, pipeline=FakePipeline())
+    worker.run_once()  # doc1
+    worker.run_once()  # doc2
+
+    # Verify both exist and have results
+    db_doc1 = service.get_document(principal, doc1.id)
+    db_doc2 = service.get_document(principal, doc2.id)
+    assert db_doc1 is not None and db_doc2 is not None
+    assert db_doc1.result_object_key is not None
+    assert db_doc2.result_object_key is not None
+
+    source_key = db_doc1.source_object_key
+    result_key1 = db_doc1.result_object_key
+
+    # Verify files exist in object store
+    assert store.get(source_key) == file_content
+    assert store.get(result_key1) is not None
+
+    # Delete the FIRST document
+    assert service.delete_document(principal, doc1.id) is True
+
+    # Doc1 should be soft-deleted
+    assert service.get_document(principal, doc1.id) is None
+
+    # The shared SOURCE object should STILL exist because doc2 is active
+    assert store.get(source_key) == file_content
+
+    # The specific RESULT object for doc1 should be deleted (it was unique)
+    try:
+        store.get(result_key1)
+        assert False, "Result object for doc1 should have been deleted"
+    except FileNotFoundError:
+        pass
+
+    # Now delete the SECOND document
+    assert service.delete_document(principal, doc2.id) is True
+
+    # Now that no active documents use the source key, it should be deleted
+    try:
+        store.get(source_key)
+        assert False, "Source object should have been deleted after the last document was deleted"
+    except FileNotFoundError:
+        pass
+
+
+def test_purge_expired_keeps_shared_objects(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from dzdoc_service.db import utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    file_content = b"%PDF-1.7\nDuplicate-Content-For-Purge"
+    doc1, job1, _ = service.submit(
+        principal, file_content, filename="doc1_purge.pdf", idempotency_key="request-doc1-purge"
+    )
+    doc2, job2, _ = service.submit(
+        principal, file_content, filename="doc2_purge.pdf", idempotency_key="request-doc2-purge"
+    )
+
+    source_key = doc1.source_object_key
+    assert source_key == doc2.source_object_key
+    assert store.get(source_key) == file_content
+
+    # Manually expire ONLY doc1
+    from dzdoc_service.db import StoredDocument
+
+    with database.session() as session:
+        db_doc1 = session.get(StoredDocument, doc1.id)
+        assert db_doc1 is not None
+        # Set to expire yesterday
+        db_doc1.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    # Purge expired documents
+    count = service.purge_expired()
+    assert count == 1
+
+    # Verify doc1 is soft-deleted
+    assert service.get_document(principal, doc1.id) is None
+
+    # The shared source object should STILL exist because doc2 is active
+    assert store.get(source_key) == file_content
+
+    # Manually expire doc2
+    with database.session() as session:
+        db_doc2 = session.get(StoredDocument, doc2.id)
+        assert db_doc2 is not None
+        db_doc2.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    # Purge again
+    count = service.purge_expired()
+    assert count == 1
+
+    # Now that no active documents use the source key, it should be deleted
+    try:
+        store.get(source_key)
+        assert False, "Source object should have been deleted after the last document was purged"
+    except FileNotFoundError:
+        pass

@@ -281,12 +281,39 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+
+            source_key = document.source_object_key
+            result_key = document.result_object_key
+
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
+
+            # Check if any other active document is using this source object
+            source_in_use = session.scalar(
+                select(1)
+                .where(
+                    StoredDocument.source_object_key == source_key,
+                    StoredDocument.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if not source_in_use:
+                self.store.delete(source_key)
+
+            if result_key:
+                # Check if any other active document is using this result object
+                result_in_use = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.result_object_key == result_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not result_in_use:
+                    self.store.delete(result_key)
+
             return True
 
     def purge_expired(self, *, now=None) -> int:
@@ -300,14 +327,42 @@ class DocumentService:
                     StoredDocument.delete_after <= current,
                 )
             ).all()
+
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
+
+            # We must commit the soft deletes before checking for orphans
             session.commit()
+
+            for document in documents:
+                source_key = document.source_object_key
+                result_key = document.result_object_key
+
+                source_in_use = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.source_object_key == source_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not source_in_use:
+                    self.store.delete(source_key)
+
+                if result_key:
+                    result_in_use = session.scalar(
+                        select(1)
+                        .where(
+                            StoredDocument.result_object_key == result_key,
+                            StoredDocument.deleted_at.is_(None),
+                        )
+                        .limit(1)
+                    )
+                    if not result_in_use:
+                        self.store.delete(result_key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
