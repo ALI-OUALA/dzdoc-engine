@@ -228,3 +228,41 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_shared_object_deletion(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant_id, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    data = b"%PDF-1.7 shared content"
+    doc1, job1, created1 = service.submit(
+        principal, data, filename="doc1.pdf", idempotency_key="key11111"
+    )
+    doc2, job2, created2 = service.submit(
+        principal, data, filename="doc2.pdf", idempotency_key="key22222"
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    assert store.exists(doc1.source_object_key)
+
+    service.delete_document(principal, doc1.id)
+
+    assert store.exists(doc2.source_object_key)
+
+    # purge doc2
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    with database.session() as session:
+        db_doc2 = session.get(StoredDocument, doc2.id)
+        assert db_doc2 is not None
+        db_doc2.delete_after = utcnow() - timedelta(days=1)
+        session.commit()
+
+    service.purge_expired()
+
+    assert not store.exists(doc2.source_object_key)

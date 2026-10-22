@@ -281,12 +281,35 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+            source_key = document.source_object_key
+            result_key = document.result_object_key
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
+
+            in_use_source = session.scalar(
+                select(1)
+                .where(
+                    StoredDocument.source_object_key == source_key,
+                    StoredDocument.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if not in_use_source:
+                self.store.delete(source_key)
+
+            if result_key:
+                in_use_result = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.result_object_key == result_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not in_use_result:
+                    self.store.delete(result_key)
+
             return True
 
     def purge_expired(self, *, now=None) -> int:
@@ -300,14 +323,39 @@ class DocumentService:
                     StoredDocument.delete_after <= current,
                 )
             ).all()
+
+            keys_to_check = []
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
+                keys_to_check.append((document.source_object_key, document.result_object_key))
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
             session.commit()
+
+            for source_key, result_key in keys_to_check:
+                in_use_source = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.source_object_key == source_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not in_use_source:
+                    self.store.delete(source_key)
+
+                if result_key:
+                    in_use_result = session.scalar(
+                        select(1)
+                        .where(
+                            StoredDocument.result_object_key == result_key,
+                            StoredDocument.deleted_at.is_(None),
+                        )
+                        .limit(1)
+                    )
+                    if not in_use_result:
+                        self.store.delete(result_key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:
