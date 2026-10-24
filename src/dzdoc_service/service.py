@@ -295,20 +295,24 @@ class DocumentService:
         with self.database.session() as session:
             if source_key_to_check:
                 in_use = session.scalar(
-                    select(1).where(
+                    select(1)
+                    .where(
                         StoredDocument.source_object_key == source_key_to_check,
-                        StoredDocument.deleted_at.is_(None)
-                    ).limit(1)
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
                 )
                 if not in_use:
                     self.store.delete(source_key_to_check)
 
             if result_key_to_check:
                 in_use = session.scalar(
-                    select(1).where(
+                    select(1)
+                    .where(
                         StoredDocument.result_object_key == result_key_to_check,
-                        StoredDocument.deleted_at.is_(None)
-                    ).limit(1)
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
                 )
                 if not in_use:
                     self.store.delete(result_key_to_check)
@@ -341,20 +345,24 @@ class DocumentService:
             for source_key, result_key in keys_to_check:
                 if source_key:
                     in_use = session.scalar(
-                        select(1).where(
+                        select(1)
+                        .where(
                             StoredDocument.source_object_key == source_key,
-                            StoredDocument.deleted_at.is_(None)
-                        ).limit(1)
+                            StoredDocument.deleted_at.is_(None),
+                        )
+                        .limit(1)
                     )
                     if not in_use:
                         self.store.delete(source_key)
 
                 if result_key:
                     in_use = session.scalar(
-                        select(1).where(
+                        select(1)
+                        .where(
                             StoredDocument.result_object_key == result_key,
-                            StoredDocument.deleted_at.is_(None)
-                        ).limit(1)
+                            StoredDocument.deleted_at.is_(None),
+                        )
+                        .limit(1)
                     )
                     if not in_use:
                         self.store.delete(result_key)
