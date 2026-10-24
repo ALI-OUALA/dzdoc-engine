@@ -228,3 +228,49 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_deduplication_delete(tmp_path: Path) -> None:
+    from dzdoc_service.config import ServiceSettings
+    from dzdoc_service.db import Database
+    from dzdoc_service.service import DocumentService
+    from dzdoc_service.storage import LocalObjectStore
+
+    settings = ServiceSettings(environment="test")
+    db = Database(f"sqlite:///{tmp_path}/test.db")
+    db.create_schema()
+    store = LocalObjectStore(tmp_path / "objects")
+
+    service = DocumentService(db, store, settings)
+    tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Submit first document
+    pdf_content = b"%PDF-1.7\nHello world deduplication!"
+    doc1, job1, created1 = service.submit(
+        principal, pdf_content, filename="doc1.pdf", idempotency_key="key123456"
+    )
+
+    # Submit second document with same content
+    doc2, job2, created2 = service.submit(
+        principal, pdf_content, filename="doc2.pdf", idempotency_key="key7891011"
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+
+    # Delete doc1
+    service.delete_document(principal, doc1.id)
+
+    # doc2's file shouldn't be deleted because doc2 still relies on it
+    assert store.get(doc2.source_object_key) is not None
+
+    # After deleting doc2, the file should finally be deleted
+    service.delete_document(principal, doc2.id)
+
+    # Store deletion test
+    try:
+        store.get(doc2.source_object_key)
+        assert False, "File should have been deleted"
+    except FileNotFoundError:
+        pass
