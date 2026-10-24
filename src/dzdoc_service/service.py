@@ -297,15 +297,18 @@ class DocumentService:
 
         for key in keys_to_check:
             with self.database.session() as session:
-                is_referenced = session.scalar(
-                    select(1)
-                    .where(StoredDocument.deleted_at.is_(None))
-                    .where(
-                        (StoredDocument.source_object_key == key)
-                        | (StoredDocument.result_object_key == key)
+                is_referenced = (
+                    session.scalar(
+                        select(1)
+                        .where(StoredDocument.deleted_at.is_(None))
+                        .where(
+                            (StoredDocument.source_object_key == key)
+                            | (StoredDocument.result_object_key == key)
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                ) is not None
+                    is not None
+                )
             if not is_referenced:
                 self.store.delete(key)
 
@@ -335,15 +338,18 @@ class DocumentService:
 
         for key in keys_to_check:
             with self.database.session() as session:
-                is_referenced = session.scalar(
-                    select(1)
-                    .where(StoredDocument.deleted_at.is_(None))
-                    .where(
-                        (StoredDocument.source_object_key == key)
-                        | (StoredDocument.result_object_key == key)
+                is_referenced = (
+                    session.scalar(
+                        select(1)
+                        .where(StoredDocument.deleted_at.is_(None))
+                        .where(
+                            (StoredDocument.source_object_key == key)
+                            | (StoredDocument.result_object_key == key)
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                ) is not None
+                    is not None
+                )
             if not is_referenced:
                 self.store.delete(key)
 
