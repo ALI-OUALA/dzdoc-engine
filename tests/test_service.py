@@ -228,3 +228,82 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_content_addressed_safe_deletion(tmp_path: Path):
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared_content", filename="f1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared_content", filename="f2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    key = doc1.source_object_key
+
+    assert store.exists(key)
+
+    # Delete first document
+    service.delete_document(admin, doc1.id)
+
+    # Key should STILL exist because doc2 references it
+    assert store.exists(key)
+
+    # Delete second document
+    service.delete_document(admin, doc2.id)
+
+    # Now key should be gone
+    assert not store.exists(key)
+
+
+def test_purge_expired_content_addressed(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\npurged_content", filename="f1.pdf", idempotency_key=None
+    )
+    doc2, _, _ = service.submit(
+        admin, b"%PDF-1.7\npurged_content", filename="f2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    key = doc1.source_object_key
+    assert store.exists(key)
+
+    now = utcnow()
+
+    # Fast forward doc1 to expire
+    with database.session() as session:
+        d1 = session.get(StoredDocument, doc1.id)
+        d1.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    service.purge_expired(now=now)
+
+    # Key should STILL exist because doc2 references it
+    assert store.exists(key)
+
+    # Fast forward doc2 to expire
+    with database.session() as session:
+        d2 = session.get(StoredDocument, doc2.id)
+        d2.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    service.purge_expired(now=now)
+
+    # Now key should be gone
+    assert not store.exists(key)
