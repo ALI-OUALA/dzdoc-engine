@@ -281,17 +281,46 @@ class DocumentService:
             )
             if document is None:
                 return False
-            self.store.delete(document.source_object_key)
-            if document.result_object_key:
-                self.store.delete(document.result_object_key)
+
+            source_key = document.source_object_key
+            result_key = document.result_object_key
+
             document.deleted_at = utcnow()
             document.status = "deleted"
             session.commit()
-            return True
+
+        # Check if objects are still referenced by ANY active document (any tenant)
+        with self.database.session() as session:
+            source_referenced = session.scalar(
+                select(1)
+                .where(
+                    StoredDocument.source_object_key == source_key,
+                    StoredDocument.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if not source_referenced:
+                self.store.delete(source_key)
+
+            if result_key:
+                result_referenced = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.result_object_key == result_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not result_referenced:
+                    self.store.delete(result_key)
+
+        return True
 
     def purge_expired(self, *, now=None) -> int:
         current = now or utcnow()
         count = 0
+        keys_to_check = []
+
         with self.database.session() as session:
             documents = session.scalars(
                 select(StoredDocument).where(
@@ -301,13 +330,37 @@ class DocumentService:
                 )
             ).all()
             for document in documents:
-                self.store.delete(document.source_object_key)
-                if document.result_object_key:
-                    self.store.delete(document.result_object_key)
+                keys_to_check.append((document.source_object_key, document.result_object_key))
                 document.deleted_at = current
                 document.status = "deleted"
                 count += 1
             session.commit()
+
+        with self.database.session() as session:
+            for source_key, result_key in keys_to_check:
+                source_referenced = session.scalar(
+                    select(1)
+                    .where(
+                        StoredDocument.source_object_key == source_key,
+                        StoredDocument.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if not source_referenced:
+                    self.store.delete(source_key)
+
+                if result_key:
+                    result_referenced = session.scalar(
+                        select(1)
+                        .where(
+                            StoredDocument.result_object_key == result_key,
+                            StoredDocument.deleted_at.is_(None),
+                        )
+                        .limit(1)
+                    )
+                    if not result_referenced:
+                        self.store.delete(result_key)
+
         return count
 
     def usage(self, principal: Principal) -> dict[str, int]:

@@ -228,3 +228,41 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.last_error == "MockHTTPError"
         assert updated.status == "pending"  # Still retries
         assert updated.attempt_count == 1
+
+
+def test_content_addressed_deletion_preserves_shared_objects(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    # Submit the same file twice to simulate deduplication
+    doc1, _job1, created1 = service.submit(
+        principal, b"%PDF-1.7\n1", filename="doc1.pdf", idempotency_key=None
+    )
+    doc2, _job2, created2 = service.submit(
+        principal, b"%PDF-1.7\n1", filename="doc2.pdf", idempotency_key=None
+    )
+
+    assert doc1.source_object_key == doc2.source_object_key
+    shared_key = doc1.source_object_key
+
+    # Store should have the object
+    assert store.get(shared_key) is not None
+
+    # Delete first document
+    assert service.delete_document(principal, doc1.id) is True
+
+    # Verify the object still exists in store because doc2 references it
+    assert store.get(shared_key) is not None
+
+    # Delete second document
+    assert service.delete_document(principal, doc2.id) is True
+
+    # Verify the object is finally deleted from store
+    try:
+        store.get(shared_key)
+        assert False, "Object should have been deleted from store"
+    except Exception as e:
+        assert "No such file or directory" in str(e)
