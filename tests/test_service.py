@@ -307,3 +307,40 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_purge_expired_batches(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Submit 105 distinct documents to verify the limit of 100
+    for i in range(105):
+        service.submit(
+            admin, f"%PDF-1.7\nbatch_{i}".encode(), filename=f"b{i}.pdf", idempotency_key=None
+        )
+
+    now = utcnow()
+
+    with database.session() as session:
+        # Fast forward all documents to expire
+        from sqlalchemy import select
+
+        docs = session.scalars(select(StoredDocument)).all()
+        for doc in docs:
+            doc.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    # First purge should only delete 100 due to limit
+    count1 = service.purge_expired(now=now)
+    assert count1 == 100
+
+    # Second purge should get the remaining 5
+    count2 = service.purge_expired(now=now)
+    assert count2 == 5
