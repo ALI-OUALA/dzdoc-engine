@@ -307,3 +307,45 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_purge_expired_batching(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Submit 105 documents to test batching logic (limit is 100)
+    for i in range(105):
+        service.submit(
+            admin,
+            f"%PDF-1.7\npurged_content_{i}".encode(),
+            filename=f"f{i}.pdf",
+            idempotency_key=None,
+        )
+
+    now = utcnow()
+
+    # Fast forward documents to expire
+    with database.session() as session:
+        from sqlalchemy import select
+
+        docs = session.scalars(select(StoredDocument)).all()
+        for doc in docs:
+            doc.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    count = service.purge_expired(now=now)
+    assert count == 105
+
+    # Verify all documents are marked as deleted
+    with database.session() as session:
+        active_docs = session.scalars(
+            select(StoredDocument).where(StoredDocument.deleted_at.is_(None))
+        ).all()
+        assert len(active_docs) == 0
