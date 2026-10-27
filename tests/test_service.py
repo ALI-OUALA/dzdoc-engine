@@ -308,6 +308,7 @@ def test_purge_expired_content_addressed(tmp_path: Path):
     # Now key should be gone
     assert not store.exists(key)
 
+
 def test_purge_expired_batches(tmp_path: Path):
     from datetime import timedelta
 
@@ -324,9 +325,7 @@ def test_purge_expired_batches(tmp_path: Path):
 
     for i in range(105):
         content = f"%PDF-1.7\npurged_content_batch_{i}".encode()
-        doc, _, _ = service.submit(
-            admin, content, filename=f"f{i}.pdf", idempotency_key=None
-        )
+        doc, _, _ = service.submit(admin, content, filename=f"f{i}.pdf", idempotency_key=None)
         document_ids.append(doc.id)
         object_keys.append(doc.source_object_key)
 
