@@ -307,3 +307,42 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_purge_expired_batches(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    docs = []
+    for i in range(3):
+        doc, _, _ = service.submit(
+            admin, f"%PDF-1.7\nbatch_{i}".encode(), filename=f"b{i}.pdf", idempotency_key=None
+        )
+        docs.append(doc)
+
+    for doc in docs:
+        assert store.exists(doc.source_object_key)
+
+    now = utcnow()
+
+    # Fast forward all docs to expire
+    with database.session() as session:
+        for doc in docs:
+            d = session.get(StoredDocument, doc.id)
+            d.delete_after = now - timedelta(days=1)
+        session.commit()
+
+    # Purge in batches of 2 (forces at least 2 batches)
+    count = service.purge_expired(now=now, batch_size=2)
+    assert count == 3
+
+    # All should be gone
+    for doc in docs:
+        assert not store.exists(doc.source_object_key)
