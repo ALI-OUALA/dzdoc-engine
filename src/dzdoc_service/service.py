@@ -143,7 +143,12 @@ class DocumentService:
             document_input = self.ingestor.from_bytes(data, name=filename)
         except IngestionError as exc:
             raise ServiceError(str(exc)) from exc
+
         with self.database.session() as session:
+            tenant = session.get(Tenant, principal.tenant_id)
+            assert tenant is not None
+            retention_days = tenant.retention_days
+
             if idempotency_key:
                 existing = session.scalar(
                     select(Job).where(
@@ -155,9 +160,10 @@ class DocumentService:
                     document = session.get(StoredDocument, existing.document_id)
                     assert document is not None
                     return document, existing, False
-            object_key = self.store.put(document_input.data)
-            tenant = session.get(Tenant, principal.tenant_id)
-            assert tenant is not None
+
+        object_key = self.store.put(document_input.data)
+
+        with self.database.session() as session:
             document = StoredDocument(
                 id=new_id(),
                 tenant_id=principal.tenant_id,
@@ -166,7 +172,7 @@ class DocumentService:
                 media_kind=document_input.kind,
                 size_bytes=document_input.size_bytes,
                 source_object_key=object_key,
-                delete_after=utcnow() + timedelta(days=tenant.retention_days),
+                delete_after=utcnow() + timedelta(days=retention_days),
             )
             job = Job(
                 id=new_id(),
@@ -285,9 +291,8 @@ class DocumentService:
                 )
                 .limit(1)
             )
-            if not in_use_source:
-                self.store.delete(source_key)
 
+            in_use_result = True
             if result_key and result_key != source_key:
                 in_use_result = session.scalar(
                     select(1)
@@ -300,8 +305,12 @@ class DocumentService:
                     )
                     .limit(1)
                 )
-                if not in_use_result:
-                    self.store.delete(result_key)
+
+        if not in_use_source:
+            self.store.delete(source_key)
+
+        if result_key and result_key != source_key and not in_use_result:
+            self.store.delete(result_key)
 
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
