@@ -333,11 +333,13 @@ class DocumentService:
             to_delete = []
             with self.database.session() as session:
                 documents = session.scalars(
-                    select(StoredDocument).where(
+                    select(StoredDocument)
+                    .where(
                         StoredDocument.deleted_at.is_(None),
                         StoredDocument.delete_after.is_not(None),
                         StoredDocument.delete_after <= current,
-                    ).limit(100)
+                    )
+                    .limit(100)
                 ).all()
 
                 if not documents:

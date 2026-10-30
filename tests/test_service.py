@@ -278,6 +278,7 @@ def test_purge_expired_batches(tmp_path: Path):
     total_docs = batch_size * 2 + 50  # 2.5 batches
 
     import hashlib
+
     # Create fake documents directly to bypass slow S3 mock/submit
     with database.session() as session:
         for i in range(total_docs):
@@ -300,6 +301,7 @@ def test_purge_expired_batches(tmp_path: Path):
 
     with database.session() as session:
         from sqlalchemy import select
+
         remaining = session.scalars(
             select(StoredDocument).where(StoredDocument.deleted_at.is_(None))
         ).all()
