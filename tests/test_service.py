@@ -307,3 +307,35 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_purge_expired_batches(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    now = utcnow()
+
+    with database.session() as session:
+        for i in range(250):
+            d = StoredDocument(
+                id=f"doc-{i}",
+                tenant_id=tenant,
+                sha256=f"hash-{i}",
+                source_name=f"file-{i}.pdf",
+                media_kind="pdf",
+                size_bytes=100,
+                source_object_key=f"{(str(i) * 64)[:64]}",
+                delete_after=now - timedelta(days=1),
+            )
+            session.add(d)
+        session.commit()
+
+    purged_count = service.purge_expired(now=now)
+    assert purged_count == 250
