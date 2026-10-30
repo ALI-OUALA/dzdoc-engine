@@ -328,24 +328,30 @@ class DocumentService:
     def purge_expired(self, *, now=None) -> int:
         current = now or utcnow()
         count = 0
-        to_delete = []
-        with self.database.session() as session:
-            documents = session.scalars(
-                select(StoredDocument).where(
-                    StoredDocument.deleted_at.is_(None),
-                    StoredDocument.delete_after.is_not(None),
-                    StoredDocument.delete_after <= current,
-                )
-            ).all()
-            for document in documents:
-                to_delete.append((document.source_object_key, document.result_object_key))
-                document.deleted_at = current
-                document.status = "deleted"
-                count += 1
-            session.commit()
 
-        for source_key, result_key in to_delete:
-            self._safe_delete_objects(source_key, result_key)
+        while True:
+            to_delete = []
+            with self.database.session() as session:
+                documents = session.scalars(
+                    select(StoredDocument).where(
+                        StoredDocument.deleted_at.is_(None),
+                        StoredDocument.delete_after.is_not(None),
+                        StoredDocument.delete_after <= current,
+                    ).limit(100)
+                ).all()
+
+                if not documents:
+                    break
+
+                for document in documents:
+                    to_delete.append((document.source_object_key, document.result_object_key))
+                    document.deleted_at = current
+                    document.status = "deleted"
+                    count += 1
+                session.commit()
+
+            for source_key, result_key in to_delete:
+                self._safe_delete_objects(source_key, result_key)
 
         return count
 

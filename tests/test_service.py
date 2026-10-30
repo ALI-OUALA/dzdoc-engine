@@ -262,6 +262,50 @@ def test_content_addressed_safe_deletion(tmp_path: Path):
     assert not store.exists(key)
 
 
+def test_purge_expired_batches(tmp_path: Path):
+    from datetime import timedelta
+
+    from dzdoc_service.db import StoredDocument, utcnow
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    now = utcnow()
+    batch_size = 100
+    total_docs = batch_size * 2 + 50  # 2.5 batches
+
+    import hashlib
+    # Create fake documents directly to bypass slow S3 mock/submit
+    with database.session() as session:
+        for i in range(total_docs):
+            doc_hash = hashlib.sha256(f"doc-{i}".encode()).hexdigest()
+            doc = StoredDocument(
+                id=f"doc-{i}",
+                tenant_id=tenant,
+                sha256=doc_hash,
+                source_name=f"f{i}.pdf",
+                media_kind="application/pdf",
+                size_bytes=100,
+                source_object_key=doc_hash,
+                delete_after=now - timedelta(days=1),
+            )
+            session.add(doc)
+        session.commit()
+
+    count = service.purge_expired(now=now)
+    assert count == total_docs
+
+    with database.session() as session:
+        from sqlalchemy import select
+        remaining = session.scalars(
+            select(StoredDocument).where(StoredDocument.deleted_at.is_(None))
+        ).all()
+        assert len(remaining) == 0
+
+
 def test_purge_expired_content_addressed(tmp_path: Path):
     from datetime import timedelta
 
