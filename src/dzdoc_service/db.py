@@ -193,29 +193,29 @@ def claim_job(
         .order_by(Job.priority.desc(), Job.created_at)
         .limit(8)
     ).all()
-    for candidate in candidates:
+    for row in candidates:
         token = secrets.token_hex(24)
-        previous_status = candidate.status
+        previous_status = row.status
         result = session.execute(
             update(Job)
             .where(
-                Job.id == candidate.id,
+                Job.id == row.id,
                 Job.status == previous_status,
-                Job.attempt_count == candidate.attempt_count,
+                Job.attempt_count == row.attempt_count,
             )
             .values(
                 status="processing",
-                attempt_count=candidate.attempt_count + 1,
+                attempt_count=row.attempt_count + 1,
                 lease_token=token,
                 lease_expires_at=current + timedelta(seconds=lease_seconds),
-                started_at=candidate.started_at or current,
+                started_at=row.started_at or current,
                 error_code=None,
                 error_message=None,
             )
         )
         if getattr(result, "rowcount", 0) == 1:
             session.commit()
-            return session.get(Job, candidate.id)
+            return session.get(Job, row.id)
         session.rollback()
     return None
 
