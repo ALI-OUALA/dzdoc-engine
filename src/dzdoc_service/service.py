@@ -143,8 +143,9 @@ class DocumentService:
             document_input = self.ingestor.from_bytes(data, name=filename)
         except IngestionError as exc:
             raise ServiceError(str(exc)) from exc
-        with self.database.session() as session:
-            if idempotency_key:
+
+        if idempotency_key:
+            with self.database.session() as session:
                 existing = session.scalar(
                     select(Job).where(
                         Job.tenant_id == principal.tenant_id,
@@ -155,7 +156,10 @@ class DocumentService:
                     document = session.get(StoredDocument, existing.document_id)
                     assert document is not None
                     return document, existing, False
-            object_key = self.store.put(document_input.data)
+
+        object_key = self.store.put(document_input.data)
+
+        with self.database.session() as session:
             tenant = session.get(Tenant, principal.tenant_id)
             assert tenant is not None
             document = StoredDocument(
