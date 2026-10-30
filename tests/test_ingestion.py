@@ -21,4 +21,4 @@ def test_size_limit_rejected():
 
 def test_non_bytes_input_rejected():
     with pytest.raises(IngestionError, match="bytes-like"):
-        SecureIngestor().from_bytes("%PDF-1.7")
+        SecureIngestor().from_bytes("%PDF-1.7")  # type: ignore

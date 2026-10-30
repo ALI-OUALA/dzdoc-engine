@@ -214,7 +214,9 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
             super().__init__(url, code, msg, hdrs, fp)
 
     def mock_urlopen(request, timeout=None):
-        raise MockHTTPError(request.full_url, 400, "Bad Request", {}, None)
+        import email.message
+
+        raise MockHTTPError(request.full_url, 400, "Bad Request", email.message.Message(), None)
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
