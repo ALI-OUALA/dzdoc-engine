@@ -372,6 +372,7 @@ def test_purge_expired_content_addressed(tmp_path: Path):
     # Now key should be gone
     assert not store.exists(key)
 
+
 def test_delete_document_is_idempotent(tmp_path: Path):
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
