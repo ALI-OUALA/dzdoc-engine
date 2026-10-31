@@ -289,9 +289,8 @@ class DocumentService:
                 )
                 .limit(1)
             )
-            if not in_use_source:
-                self.store.delete(source_key)
 
+            in_use_result = True
             if result_key and result_key != source_key:
                 in_use_result = session.scalar(
                     select(1)
@@ -304,8 +303,11 @@ class DocumentService:
                     )
                     .limit(1)
                 )
-                if not in_use_result:
-                    self.store.delete(result_key)
+
+        if not in_use_source:
+            self.store.delete(source_key)
+        if result_key and result_key != source_key and not in_use_result:
+            self.store.delete(result_key)
 
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
@@ -314,6 +316,7 @@ class DocumentService:
                 select(StoredDocument).where(
                     StoredDocument.id == document_id,
                     StoredDocument.tenant_id == principal.tenant_id,
+                    StoredDocument.deleted_at.is_(None),
                 )
             )
             if document is None:

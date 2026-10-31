@@ -268,13 +268,16 @@ def test_content_addressed_safe_deletion(tmp_path: Path):
     assert store.exists(key)
 
     # Delete first document
-    service.delete_document(admin, doc1.id)
+    assert service.delete_document(admin, doc1.id)
+
+    # Second delete of first document should return False (idempotent)
+    assert not service.delete_document(admin, doc1.id)
 
     # Key should STILL exist because doc2 references it
     assert store.exists(key)
 
     # Delete second document
-    service.delete_document(admin, doc2.id)
+    assert service.delete_document(admin, doc2.id)
 
     # Now key should be gone
     assert not store.exists(key)
