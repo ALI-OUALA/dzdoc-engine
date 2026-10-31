@@ -371,3 +371,20 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+def test_delete_document_is_idempotent(tmp_path: Path):
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared_content", filename="f1.pdf", idempotency_key=None
+    )
+
+    result1 = service.delete_document(admin, doc1.id)
+    assert result1 is True
+
+    result2 = service.delete_document(admin, doc1.id)
+    assert result2 is False
