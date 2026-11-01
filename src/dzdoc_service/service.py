@@ -314,6 +314,7 @@ class DocumentService:
                 select(StoredDocument).where(
                     StoredDocument.id == document_id,
                     StoredDocument.tenant_id == principal.tenant_id,
+                    StoredDocument.deleted_at.is_(None),
                 )
             )
             if document is None:
