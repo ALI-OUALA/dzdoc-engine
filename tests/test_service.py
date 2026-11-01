@@ -248,6 +248,21 @@ def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatc
         assert updated.attempt_count == 1
 
 
+def test_delete_document_is_idempotent(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc, _, _ = service.submit(
+        admin, b"%PDF-1.7\ntest_idempotency", filename="idempotency.pdf", idempotency_key=None
+    )
+
+    assert service.delete_document(admin, doc.id) is True
+    assert service.delete_document(admin, doc.id) is False
+
+
 def test_content_addressed_safe_deletion(tmp_path: Path):
     settings, database, store = _runtime(tmp_path)
     service = DocumentService(database, store, settings)
