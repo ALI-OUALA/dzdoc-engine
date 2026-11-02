@@ -326,6 +326,24 @@ def test_purge_expired_batches(tmp_path: Path):
         assert len(remaining) == 0
 
 
+def test_delete_document_is_idempotent(tmp_path: Path) -> None:
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _tenant, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    document, _job, _created = service.submit(
+        principal,
+        b"%PDF-1.7\n",
+        filename="test.pdf",
+        idempotency_key=None,
+    )
+
+    assert service.delete_document(principal, document.id) is True
+    assert service.delete_document(principal, document.id) is False
+
+
 def test_purge_expired_content_addressed(tmp_path: Path):
     from datetime import timedelta
 
