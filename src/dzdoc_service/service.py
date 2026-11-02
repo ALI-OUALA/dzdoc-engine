@@ -319,6 +319,9 @@ class DocumentService:
             if document is None:
                 return False
 
+            if document.deleted_at is not None:
+                return True
+
             source_key = document.source_object_key
             result_key = document.result_object_key
 

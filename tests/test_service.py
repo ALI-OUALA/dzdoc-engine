@@ -371,3 +371,26 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_delete_document_idempotency(tmp_path: Path):
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc1, _, _ = service.submit(
+        admin, b"%PDF-1.7\nshared_content", filename="f1.pdf", idempotency_key=None
+    )
+
+    # First deletion should succeed and return True
+    assert service.delete_document(admin, doc1.id) is True
+
+    # Second deletion should return True without error (idempotent),
+    # even though it's already soft-deleted.
+    assert service.delete_document(admin, doc1.id) is True
+
+    # But for a non-existent document, it should return False
+    assert service.delete_document(admin, "fake_id") is False
