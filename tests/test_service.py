@@ -371,3 +371,36 @@ def test_purge_expired_content_addressed(tmp_path: Path):
 
     # Now key should be gone
     assert not store.exists(key)
+
+
+def test_delete_document_is_idempotent(tmp_path):
+
+    from dzdoc_service.db import StoredDocument
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    doc, _, _ = service.submit(
+        admin, b"%PDF-1.7\ntestcontent", filename="test.pdf", idempotency_key=None
+    )
+
+    assert doc.deleted_at is None
+
+    # First deletion
+    assert service.delete_document(admin, doc.id) is True
+
+    with database.session() as session:
+        deleted_doc = session.get(StoredDocument, doc.id)
+        assert deleted_doc is not None
+        assert deleted_doc.deleted_at is not None
+        deleted_at_first = deleted_doc.deleted_at
+
+    # Second deletion should return True but not change deleted_at
+    assert service.delete_document(admin, doc.id) is True
+
+    with database.session() as session:
+        deleted_doc_again = session.get(StoredDocument, doc.id)
+        assert deleted_doc_again.deleted_at == deleted_at_first
