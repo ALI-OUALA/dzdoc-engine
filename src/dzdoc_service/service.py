@@ -277,6 +277,7 @@ class DocumentService:
     def _safe_delete_objects(self, source_key: str, result_key: str | None) -> None:
         from sqlalchemy import or_
 
+        to_delete = []
         with self.database.session() as session:
             in_use_source = session.scalar(
                 select(1)
@@ -290,7 +291,7 @@ class DocumentService:
                 .limit(1)
             )
             if not in_use_source:
-                self.store.delete(source_key)
+                to_delete.append(source_key)
 
             if result_key and result_key != source_key:
                 in_use_result = session.scalar(
@@ -305,7 +306,10 @@ class DocumentService:
                     .limit(1)
                 )
                 if not in_use_result:
-                    self.store.delete(result_key)
+                    to_delete.append(result_key)
+
+        for key in to_delete:
+            self.store.delete(key)
 
     def delete_document(self, principal: Principal, document_id: str) -> bool:
         principal.require("documents:delete")
@@ -318,6 +322,8 @@ class DocumentService:
             )
             if document is None:
                 return False
+            if document.deleted_at is not None:
+                return True
 
             source_key = document.source_object_key
             result_key = document.result_object_key
