@@ -440,7 +440,6 @@ def test_failing_pipeline_triggers_webhook_on_dead_letter(tmp_path: Path):
                 j.available_at = utcnow()
             session.commit()
 
-
     # Worker has reached max_attempts, job should be dead_letter and webhook delivered
     with database.session() as session:
         j = session.get(Job, job.id)
