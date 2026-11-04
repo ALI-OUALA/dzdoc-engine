@@ -404,3 +404,50 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_failing_pipeline_triggers_webhook_on_dead_letter(tmp_path: Path):
+    from dzdoc_service.db import Job, WebhookDelivery, utcnow
+    from dzdoc_service.worker import Worker
+
+    class FailingPipeline:
+        def process_bytes(self, data: bytes, *, name: str):
+            raise Exception("Mock processing failure")
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    principal = service.authenticate(admin_token)
+    assert principal is not None
+
+    endpoint, _ = service.add_webhook(principal, "https://example.com/webhook")
+
+    document, job, is_new = service.submit(
+        principal, b"%PDF-1.7 mock", filename="test.pdf", idempotency_key="webhook-test"
+    )
+
+    worker = Worker(database, store, settings, pipeline=FailingPipeline())
+
+    # Process attempts
+
+    for _ in range(settings.max_attempts):
+        worker.run_once()
+        # when a job fails and is requeued, available_at is advanced by min(300, 2**attempt_count)
+        # we need to simulate time passing so claim_job picks it up again
+        with database.session() as session:
+            j = session.get(Job, job.id)
+            if j and j.status == "queued":
+                j.available_at = utcnow()
+            session.commit()
+
+
+    # Worker has reached max_attempts, job should be dead_letter and webhook delivered
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j.status == "dead_letter"
+        deliveries = session.query(WebhookDelivery).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+        payload = json.loads(deliveries[0].payload_json)
+        assert payload["status"] == "failed"
+        assert payload["type"] == "document.failed"
