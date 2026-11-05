@@ -129,6 +129,9 @@ class Worker:
             job.finished_at = utcnow()
             if document:
                 document.status = "failed"
+            self._queue_webhooks(
+                session, job, document, event_type="document.failed", status="failed"
+            )
         else:
             job.status = "queued"
             job.available_at = utcnow() + timedelta(seconds=min(300, 2**job.attempt_count))
@@ -136,21 +139,30 @@ class Worker:
                 document.status = "queued"
         session.commit()
 
-    def _queue_webhooks(self, session, job: Job, document: StoredDocument) -> None:
+    def _queue_webhooks(
+        self,
+        session,
+        job: Job,
+        document: StoredDocument | None,
+        event_type: str = "document.completed",
+        status: str = "succeeded",
+    ) -> None:
         endpoints = session.scalars(
             select(WebhookEndpoint).where(
                 WebhookEndpoint.tenant_id == job.tenant_id,
                 WebhookEndpoint.active.is_(True),
             )
         ).all()
+        if not endpoints:
+            return
         event_id = new_id()
         payload = safe_json(
             {
                 "id": event_id,
-                "type": "document.completed",
-                "document_id": document.id,
+                "type": event_type,
+                "document_id": document.id if document else None,
                 "job_id": job.id,
-                "status": "succeeded",
+                "status": status,
             }
         )
         for endpoint in endpoints:
@@ -160,7 +172,7 @@ class Worker:
                     tenant_id=job.tenant_id,
                     endpoint_id=endpoint.id,
                     event_id=event_id,
-                    event_type="document.completed",
+                    event_type=event_type,
                     payload_json=payload,
                 )
             )
