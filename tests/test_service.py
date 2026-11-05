@@ -404,3 +404,45 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+class FailingPipeline:
+    def process_bytes(self, data: bytes, *, name: str) -> None:
+        raise ValueError("Simulated pipeline failure")
+
+
+def test_failed_job_triggers_webhook(tmp_path: Path) -> None:
+    from sqlalchemy import select
+
+    from dzdoc_service.db import Job, WebhookDelivery
+
+    settings, database, store = _runtime(tmp_path)
+    # Ensure it reaches max attempts quickly
+    settings = ServiceSettings(
+        database_url=settings.database_url,
+        object_root=settings.object_root,
+        max_attempts=1,
+    )
+    service = DocumentService(database, store, settings)
+
+    tenant_id, admin_token = service.bootstrap()
+    principal = service.authenticate(admin_token)
+    assert principal is not None
+
+    service.add_webhook(principal, "https://example.com/webhook")
+
+    doc, job, _ = service.submit(
+        principal, b"%PDF-1.7\ncontent", filename="fail.pdf", idempotency_key=None
+    )
+
+    worker = Worker(database, store, settings, pipeline=FailingPipeline())
+    worker.run_once()
+
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j.status == "dead_letter"
+
+        deliveries = session.scalars(select(WebhookDelivery)).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+        assert "document.failed" in deliveries[0].payload_json
