@@ -404,3 +404,53 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_webhook_dispatched_on_permanent_failure(tmp_path: Path) -> None:
+    from sqlalchemy import select
+
+    from dzdoc_service.db import Job, WebhookDelivery, WebhookEndpoint, new_id
+    from dzdoc_service.worker import Worker
+
+    class FailingPipeline:
+        def process_bytes(self, _content: bytes, **kwargs):
+            raise ValueError("Intentional permanent failure")
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+
+    tenant_id, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    with database.session() as session:
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+            active=True,
+        )
+        session.add(endpoint)
+        session.commit()
+
+    doc, job, _ = service.submit(
+        principal, b"%PDF-1.7\n", filename="test.pdf", idempotency_key=None
+    )
+
+    # Force attempt_count to trigger dead_letter immediately on next failure
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        j.attempt_count = j.max_attempts - 1
+        session.commit()
+
+    worker = Worker(database, store, settings, pipeline=FailingPipeline())
+    worker.run_once()
+
+    with database.session() as session:
+        deliveries = session.scalars(
+            select(WebhookDelivery).where(WebhookDelivery.tenant_id == tenant_id)
+        ).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
