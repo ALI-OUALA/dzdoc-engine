@@ -404,3 +404,56 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_worker_fail_queues_webhook(tmp_path: Path):
+    from dzdoc_service.db import Job, StoredDocument, WebhookDelivery, WebhookEndpoint, new_id
+    from dzdoc_service.worker import Worker
+
+    class FailingPipeline:
+        def process_bytes(self, data: bytes, *, name: str) -> Document:
+            raise ValueError("Simulated failure")
+
+    settings, database, store = _runtime(tmp_path)
+
+    tenant_id = new_id()
+    doc_id = new_id()
+    job_id = new_id()
+
+    with database.session() as session:
+        endpoint = WebhookEndpoint(
+            id=new_id(), tenant_id=tenant_id, url="http://x", secret_hash="x", signing_secret="x"
+        )
+        session.add(endpoint)
+        doc = StoredDocument(
+            id=doc_id,
+            tenant_id=tenant_id,
+            sha256="x",
+            source_name="x",
+            media_kind="pdf",
+            size_bytes=1,
+            source_object_key="x",
+        )
+        session.add(doc)
+        job = Job(
+            id=job_id,
+            tenant_id=tenant_id,
+            document_id=doc_id,
+            priority=10,
+            max_attempts=3,
+            attempt_count=2,
+            status="queued",
+        )
+        session.add(job)
+        session.commit()
+
+    worker = Worker(database, store, settings, pipeline=FailingPipeline())
+    worker.run_once()
+
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job.status == "dead_letter"
+        deliveries = session.query(WebhookDelivery).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+        assert "failed" in deliveries[0].payload_json
