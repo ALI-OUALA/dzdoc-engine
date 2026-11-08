@@ -353,6 +353,7 @@ def test_purge_expired_content_addressed(tmp_path: Path):
     # Fast forward doc1 to expire
     with database.session() as session:
         d1 = session.get(StoredDocument, doc1.id)
+        assert d1 is not None
         d1.delete_after = now - timedelta(days=1)
         session.commit()
 
@@ -364,6 +365,7 @@ def test_purge_expired_content_addressed(tmp_path: Path):
     # Fast forward doc2 to expire
     with database.session() as session:
         d2 = session.get(StoredDocument, doc2.id)
+        assert d2 is not None
         d2.delete_after = now - timedelta(days=1)
         session.commit()
 
@@ -403,4 +405,76 @@ def test_delete_document_is_idempotent(tmp_path):
 
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
+        assert deleted_doc_again is not None
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_failed_job_queues_webhook(tmp_path: Path):
+    import json
+
+    from dzdoc_service.config import ServiceSettings
+    from dzdoc_service.db import (
+        Database,
+        Job,
+        StoredDocument,
+        WebhookDelivery,
+        WebhookEndpoint,
+        new_id,
+    )
+    from dzdoc_service.storage import LocalObjectStore
+    from dzdoc_service.worker import Worker
+
+    db_path = tmp_path / "test.db"
+    database = Database(f"sqlite:///{db_path}")
+    database.create_schema()
+    settings = ServiceSettings(object_root=tmp_path / "objects")
+    store = LocalObjectStore(settings.object_root)
+
+    with database.session() as session:
+        tenant_id = new_id()
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+            active=True
+        )
+        doc = StoredDocument(
+            id=new_id(),
+            tenant_id=tenant_id,
+            sha256="0" * 64,
+            source_name="x",
+            media_kind="pdf",
+            size_bytes=10,
+            source_object_key="a"
+        )
+        job = Job(
+            id=new_id(),
+            tenant_id=tenant_id,
+            document_id=doc.id,
+            priority=10,
+            status="processing",
+            attempt_count=10,
+            max_attempts=10,
+            lease_token="token"
+        )
+        session.add_all([endpoint, doc, job])
+        session.commit()
+
+        job_id = job.id
+
+    worker = Worker(database, store, settings)
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        worker._fail(session, job, "error_code", "error_message")
+
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "dead_letter"
+        deliveries = session.query(WebhookDelivery).filter_by(tenant_id=tenant_id).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+        assert json.loads(deliveries[0].payload_json)["status"] == "failed"

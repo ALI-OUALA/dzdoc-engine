@@ -34,13 +34,13 @@ def test_claim_job_rollback_lazy_load():
                     rowcount = 0
 
                 # Check if it's the update for j1. We can just use a counter or global
-                if mock_execute.call_count == 0:
-                    mock_execute.call_count += 1
-                    return MockResult()
+                if call_state["count"] == 0:
+                    call_state["count"] += 1
+                    return MockResult()  # type: ignore
             return original_execute(statement, *args, **kwargs)
 
-        mock_execute.call_count = 0
-        session.execute = mock_execute
+        call_state = {"count": 0}
+        session.execute = mock_execute  # type: ignore
 
         claimed = claim_job(session, capability="cpu", lease_seconds=60)
         assert claimed is not None
