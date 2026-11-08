@@ -438,7 +438,7 @@ def test_failed_job_queues_webhook(tmp_path: Path):
             url="https://example.com/webhook",
             secret_hash="hash",
             signing_secret="secret",
-            active=True
+            active=True,
         )
         doc = StoredDocument(
             id=new_id(),
@@ -447,7 +447,7 @@ def test_failed_job_queues_webhook(tmp_path: Path):
             source_name="x",
             media_kind="pdf",
             size_bytes=10,
-            source_object_key="a"
+            source_object_key="a",
         )
         job = Job(
             id=new_id(),
@@ -457,7 +457,7 @@ def test_failed_job_queues_webhook(tmp_path: Path):
             status="processing",
             attempt_count=10,
             max_attempts=10,
-            lease_token="token"
+            lease_token="token",
         )
         session.add_all([endpoint, doc, job])
         session.commit()
