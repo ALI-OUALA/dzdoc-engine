@@ -194,6 +194,55 @@ def test_result_is_valid_utf8_json(tmp_path: Path) -> None:
     assert json.loads(stored.decode("utf-8"))["source_name"] == "فاتورة.pdf"
 
 
+class FailingPipeline:
+    def process_bytes(self, data: bytes, *, name: str):
+        raise RuntimeError("simulated pipeline failure")
+
+
+def test_failing_job_triggers_failed_webhook(tmp_path: Path) -> None:
+    from dzdoc_service.db import Job, WebhookDelivery, WebhookEndpoint, new_id
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    with database.session() as session:
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=principal.tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+        )
+        session.add(endpoint)
+        session.commit()
+
+    _document, job, _ = service.submit(
+        principal, b"%PDF-1.7\n", filename="failing.pdf", idempotency_key=None
+    )
+
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j is not None
+        j.attempt_count = j.max_attempts - 1
+        session.commit()
+
+    Worker(database, store, settings, pipeline=FailingPipeline()).run_once()
+
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j is not None
+        assert j.status == "dead_letter"
+
+        deliveries = session.query(WebhookDelivery).filter_by(tenant_id=principal.tenant_id).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+        assert "document.failed" in deliveries[0].payload_json
+        assert "failed" in deliveries[0].payload_json
+
+
 def test_webhook_dispatcher_captures_http_error_codes(tmp_path: Path, monkeypatch) -> None:
     import urllib.error
     import urllib.request
