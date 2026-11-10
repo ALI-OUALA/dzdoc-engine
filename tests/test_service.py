@@ -404,3 +404,56 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+def test_webhook_queued_on_document_failed(tmp_path: Path) -> None:
+    from sqlalchemy import select
+    from dzdoc_service.db import Job, WebhookDelivery, WebhookEndpoint, new_id
+    from dzdoc_service.worker import Worker
+    from dzdoc.models import Document
+
+    class FailingPipeline:
+        def process_bytes(self, data: bytes, *, name: str) -> Document:
+            raise RuntimeError("Pipeline failed")
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    tenant, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    with database.session() as session:
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=tenant,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+            active=True
+        )
+        session.add(endpoint)
+        session.commit()
+
+    _document, job, _ = service.submit(
+        admin, b"%PDF-1.7\n", filename="test.pdf", idempotency_key=None
+    )
+
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j is not None
+        j.attempt_count = j.max_attempts - 1
+        session.commit()
+
+    Worker(database, store, settings, pipeline=FailingPipeline()).run_once()
+
+    with database.session() as session:
+        deliveries = session.scalars(
+            select(WebhookDelivery).where(WebhookDelivery.tenant_id == tenant)
+        ).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].event_type == "document.failed"
+
+        import json
+        payload = json.loads(deliveries[0].payload_json)
+        assert payload["type"] == "document.failed"
+        assert payload["status"] == "failed"
+        assert payload["job_id"] == job.id
