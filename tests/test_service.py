@@ -407,9 +407,9 @@ def test_delete_document_is_idempotent(tmp_path):
 
 def test_webhook_queued_on_document_failed(tmp_path: Path) -> None:
     from sqlalchemy import select
+
     from dzdoc_service.db import Job, WebhookDelivery, WebhookEndpoint, new_id
     from dzdoc_service.worker import Worker
-    from dzdoc.models import Document
 
     class FailingPipeline:
         def process_bytes(self, data: bytes, *, name: str) -> Document:
