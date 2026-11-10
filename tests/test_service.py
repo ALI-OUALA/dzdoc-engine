@@ -404,3 +404,55 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_webhook_dispatched_on_job_failure(tmp_path: Path) -> None:
+    from sqlalchemy import select
+
+    from dzdoc_service.db import Job, WebhookDelivery
+    from dzdoc_service.worker import Worker
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _, token = service.bootstrap()
+    principal = service.authenticate(token)
+    assert principal is not None
+
+    endpoint, secret = service.add_webhook(principal, "https://example.com/webhook")
+
+    _document, job, _ = service.submit(
+        principal, b"%PDF-1.7\nfailcontent", filename="fail_doc.pdf", idempotency_key=None
+    )
+
+    # We want to force dead_letter status
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j is not None
+        j.attempt_count = j.max_attempts - 1
+        session.commit()
+
+    class FailingPipeline:
+        def process_bytes(self, data: bytes, *, name: str):
+            raise Exception("Pipeline explicitly failed for testing")
+
+    Worker(database, store, settings, pipeline=FailingPipeline()).run_once()
+
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        assert j is not None
+        assert j.status == "dead_letter"
+
+        deliveries = session.scalars(
+            select(WebhookDelivery).where(WebhookDelivery.tenant_id == principal.tenant_id)
+        ).all()
+
+        assert len(deliveries) == 1
+        delivery = deliveries[0]
+        assert delivery.event_type == "document.failed"
+
+        import json
+
+        payload = json.loads(delivery.payload_json)
+        assert payload["type"] == "document.failed"
+        assert payload["status"] == "failed"
+        assert payload["job_id"] == job.id
