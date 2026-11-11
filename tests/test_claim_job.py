@@ -26,7 +26,7 @@ def test_claim_job_rollback_lazy_load():
     with db.session() as session:
         original_execute = session.execute
 
-        call_state = {'count': 0}
+        call_state = {"count": 0}
 
         def mock_execute(statement, *args, **kwargs):
             if getattr(statement, "is_update", False):
@@ -36,8 +36,8 @@ def test_claim_job_rollback_lazy_load():
                     rowcount = 0
 
                 # Check if it's the update for j1. We can just use a counter or global
-                if call_state['count'] == 0:
-                    call_state['count'] += 1
+                if call_state["count"] == 0:
+                    call_state["count"] += 1
                     return MockResult()
             return original_execute(statement, *args, **kwargs)
 
