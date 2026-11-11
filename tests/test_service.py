@@ -404,3 +404,62 @@ def test_delete_document_is_idempotent(tmp_path):
     with database.session() as session:
         deleted_doc_again = session.get(StoredDocument, doc.id)
         assert deleted_doc_again.deleted_at == deleted_at_first
+
+
+def test_failed_document_triggers_webhook(tmp_path):
+    from sqlalchemy import select
+
+    from dzdoc_service.db import Job, WebhookDelivery, WebhookEndpoint, new_id
+    from dzdoc_service.worker import Pipeline, Worker
+
+    class FailingPipeline(Pipeline):
+        def process_bytes(self, data: bytes, *, name: str) -> Document:
+            raise RuntimeError("simulated pipeline failure")
+
+    settings, database, store = _runtime(tmp_path)
+    service = DocumentService(database, store, settings)
+    _, admin_token = service.bootstrap()
+    admin = service.authenticate(admin_token)
+    assert admin is not None
+
+    # Register a webhook
+    with database.session() as session:
+        endpoint = WebhookEndpoint(
+            id=new_id(),
+            tenant_id=admin.tenant_id,
+            url="https://example.com/webhook",
+            secret_hash="hash",
+            signing_secret="secret",
+            active=True,
+        )
+        session.add(endpoint)
+        session.commit()
+
+    # Submit a document
+    doc, job, _ = service.submit(
+        admin, b"%PDF-1.7\ncontent", filename="f1.pdf", idempotency_key=None
+    )
+
+    # Force attempt count to be max_attempts - 1 so it fails permanently on next run
+    with database.session() as session:
+        j = session.get(Job, job.id)
+        j.attempt_count = j.max_attempts - 1
+        session.commit()
+
+    # Run the worker once
+    worker = Worker(database, store, settings, pipeline=FailingPipeline())
+    worker.run_once()
+
+    # Check webhook delivery
+    with database.session() as session:
+        deliveries = session.scalars(select(WebhookDelivery)).all()
+        assert len(deliveries) == 1
+        delivery = deliveries[0]
+        assert delivery.event_type == "document.failed"
+        import json
+
+        payload = json.loads(delivery.payload_json)
+        assert payload["status"] == "failed"
+        assert payload["type"] == "document.failed"
+        assert payload["document_id"] == doc.id
+        assert payload["job_id"] == job.id
